@@ -1,0 +1,54 @@
+seed: 0
+
+data:
+  csv_path: data/hv_hospital_day3_day5/metadata/hv_day3_day5.csv
+  data_root: data/hv_hospital_day3_day5
+  train_frac: 0.8
+  val_frac: 0.1
+  test_frac: 0.1
+  batch_size: 32
+  num_workers: 4
+
+  resize_size: 256
+  crop_size: 224
+  rotation_deg: 15
+  color_jitter: 0.1
+  horizontal_flip: 0.5
+  normalize_mean: [0.5, 0.5, 0.5]
+  normalize_std: [0.5, 0.5, 0.5]
+
+model:
+  # BẮT BUỘC để build_model(cfg) chọn đúng kiến trúc mới
+  name: ivf_convnext_lite
+
+  # Head dropout (đúng với models.py)
+  dropout: 0.2
+
+  # IVF in-domain: nên giữ chi tiết -> stride 2
+  stem_stride: 2
+
+  # default mạnh - gọn
+  dims: [64, 128, 256, 512]
+  depths: [2, 2, 6, 2]
+
+  # regularization
+  drop_path_rate: 0.1
+  mlp_ratio: 4
+  layer_scale_init: 1.0e-6
+
+training:
+  epochs: 20
+  lr: 0.0003
+  weight_decay: 0.0001
+
+  early_stopping:
+    monitor: val_auprc
+    patience: 5
+
+  precision: 32
+  accelerator: auto
+  devices: 1
+  deterministic: true
+
+logging:
+  output_dir: outputs
