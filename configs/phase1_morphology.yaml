@@ -54,6 +54,7 @@ training:
 
   early_stopping:
     monitor: train_loss
+    enabled: false
     patience: 10
 
   precision: 32

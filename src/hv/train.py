@@ -160,27 +160,42 @@ class LitClassifier(pl.LightningModule):
             if (stage_targets != -1).any():
                 loss_stage = self.loss_stage_fn(outputs["logits_stage"], stage_targets)
                 loss = loss + self.loss_w_stage * loss_stage
+            else:
+                if batch_idx == 0:
+                    print("[warn] stage targets are all -1; stage loss skipped.")
         if self.task in {"morphology", "all"} and self.enable_morph:
             if outputs["logits_morph"] is not None and "morph" in batch:
                 morph_targets = batch["morph"].long()
                 if (morph_targets != -1).any():
                     loss_morph = self.loss_morph_fn(outputs["logits_morph"], morph_targets)
                     loss = loss + self.loss_w_morph * loss_morph
+                else:
+                    if batch_idx == 0:
+                        print("[warn] morph targets are all -1; morph loss skipped.")
             if outputs["logits_exp"] is not None and "exp" in batch:
                 exp_targets = batch["exp"].long()
                 if (exp_targets != -1).any():
                     loss_exp = self.loss_exp_fn(outputs["logits_exp"], exp_targets)
                     loss = loss + self.loss_w_exp * loss_exp
+                else:
+                    if batch_idx == 0:
+                        print("[warn] exp targets are all -1; exp loss skipped.")
             if outputs["logits_icm"] is not None and "icm" in batch:
                 icm_targets = batch["icm"].long()
                 if (icm_targets != -1).any():
                     loss_icm = self.loss_icm_fn(outputs["logits_icm"], icm_targets)
                     loss = loss + self.loss_w_icm * loss_icm
+                else:
+                    if batch_idx == 0:
+                        print("[warn] icm targets are all -1; icm loss skipped.")
             if outputs["logits_te"] is not None and "te" in batch:
                 te_targets = batch["te"].long()
                 if (te_targets != -1).any():
                     loss_te = self.loss_te_fn(outputs["logits_te"], te_targets)
                     loss = loss + self.loss_w_te * loss_te
+                else:
+                    if batch_idx == 0:
+                        print("[warn] te targets are all -1; te loss skipped.")
 
         if not isinstance(loss, torch.Tensor):
             loss = torch.tensor(float(loss), device=self.device)
@@ -225,6 +240,9 @@ class LitClassifier(pl.LightningModule):
                 valid = stage_targets != -1
                 self.stage_correct += int((stage_preds[valid] == stage_targets[valid]).sum().item())
                 self.stage_total += int(valid.sum().item())
+            else:
+                if batch_idx == 0:
+                    print("[warn] stage targets are all -1; stage loss skipped.")
         if self.task in {"morphology", "all"} and self.enable_morph:
             if outputs["logits_morph"] is not None and "morph" in batch:
                 morph_targets = batch["morph"].long()
@@ -235,6 +253,9 @@ class LitClassifier(pl.LightningModule):
                     valid = morph_targets != -1
                     self.morph_correct += int((morph_preds[valid] == morph_targets[valid]).sum().item())
                     self.morph_total += int(valid.sum().item())
+                else:
+                    if batch_idx == 0:
+                        print("[warn] morph targets are all -1; morph loss skipped.")
             if outputs["logits_exp"] is not None and "exp" in batch:
                 exp_targets = batch["exp"].long()
                 if (exp_targets != -1).any():
@@ -244,6 +265,9 @@ class LitClassifier(pl.LightningModule):
                     valid = exp_targets != -1
                     self.exp_correct += int((exp_preds[valid] == exp_targets[valid]).sum().item())
                     self.exp_total += int(valid.sum().item())
+                else:
+                    if batch_idx == 0:
+                        print("[warn] exp targets are all -1; exp loss skipped.")
             if outputs["logits_icm"] is not None and "icm" in batch:
                 icm_targets = batch["icm"].long()
                 if (icm_targets != -1).any():
@@ -253,6 +277,9 @@ class LitClassifier(pl.LightningModule):
                     valid = icm_targets != -1
                     self.icm_correct += int((icm_preds[valid] == icm_targets[valid]).sum().item())
                     self.icm_total += int(valid.sum().item())
+                else:
+                    if batch_idx == 0:
+                        print("[warn] icm targets are all -1; icm loss skipped.")
             if outputs["logits_te"] is not None and "te" in batch:
                 te_targets = batch["te"].long()
                 if (te_targets != -1).any():
@@ -262,6 +289,9 @@ class LitClassifier(pl.LightningModule):
                     valid = te_targets != -1
                     self.te_correct += int((te_preds[valid] == te_targets[valid]).sum().item())
                     self.te_total += int(valid.sum().item())
+                else:
+                    if batch_idx == 0:
+                        print("[warn] te targets are all -1; te loss skipped.")
 
         if not isinstance(loss, torch.Tensor):
             loss = torch.tensor(float(loss), device=self.device)
@@ -350,21 +380,37 @@ def run_training(cfg, overfit_n=0):
     csv_logger = CSVLogger(save_dir=str(output_dir / "logs"), name="csv")
     tb_logger = TensorBoardLogger(save_dir=str(output_dir / "logs"), name="tb")
 
-    monitor = str(cfg.training.early_stopping.monitor)
+    training_cfg = _cfg_get(cfg, "training", cfg)
+    early_cfg = _cfg_get(training_cfg, "early_stopping", {})
+    monitor = str(_cfg_get(early_cfg, "monitor", "val_auprc"))
+    early_enabled = bool(_cfg_get(early_cfg, "enabled", True))
+    patience = int(_cfg_get(early_cfg, "patience", 10))
+    mode = str(_cfg_get(early_cfg, "mode", "auto")).lower()
+
+    if dm.val_df is not None and len(dm.val_df) == 0 and monitor.startswith("val_"):
+        monitor = "train_loss_epoch"
+        print("[warn] val split empty; switching monitor to train_loss_epoch.")
+
+    if mode == "auto":
+        mode = "min" if "loss" in monitor else "max"
+
     ckpt_cb = ModelCheckpoint(
         dirpath=str(output_dir),
         monitor=monitor,
-        mode="max",
+        mode=mode,
         save_top_k=1,
         save_last=False,
         filename="best",
         enable_version_counter=False,
     )
-    es_cb = EarlyStopping(
-        monitor=monitor,
-        mode="max",
-        patience=int(cfg.training.early_stopping.patience),
-    )
+    callbacks = [ckpt_cb]
+    if early_enabled:
+        es_cb = EarlyStopping(
+            monitor=monitor,
+            mode=mode,
+            patience=patience,
+        )
+        callbacks.append(es_cb)
 
     precision = int(cfg.training.precision)
     if precision == 16 and not torch.cuda.is_available():
@@ -376,7 +422,7 @@ def run_training(cfg, overfit_n=0):
         devices=int(cfg.training.devices),
         precision=precision,
         deterministic=bool(cfg.training.deterministic),
-        callbacks=[ckpt_cb, es_cb],
+        callbacks=callbacks,
         logger=[csv_logger, tb_logger],
         log_every_n_steps=10,
     )

@@ -36,6 +36,8 @@ def collect_predictions(model, loader, device):
     collect_icm = None
     collect_te = None
     model.eval()
+    probs = torch.empty(0)
+    batch_size = 0
     with torch.no_grad():
         for batch in loader:
             images = batch["image"].to(device)
@@ -54,13 +56,14 @@ def collect_predictions(model, loader, device):
                 logits_exp = None
                 logits_icm = None
                 logits_te = None
+            probs = torch.empty(0)
             if logits_quality is not None:
                 probs = torch.sigmoid(logits_quality)
                 probs_list.append(probs.cpu())
                 targets_list.append(batch["label"].cpu())
             image_paths.extend(batch["image_path"])
 
-            batch_size = probs.shape[0]
+            batch_size = len(batch["image_path"])
             if collect_stage is None:
                 collect_stage = logits_stage is not None
             if collect_stage:
@@ -199,8 +202,8 @@ def main():
 
     pred_data = {
         "image_path": image_paths,
-        "y_true": targets.int().tolist(),
-        "y_prob": probs.tolist(),
+        "y_true": targets.int().tolist() if targets.numel() else [-1] * len(image_paths),
+        "y_prob": probs.tolist() if probs.numel() else [None] * len(image_paths),
         "y_pred": preds,
         "threshold_used": float(threshold),
     }

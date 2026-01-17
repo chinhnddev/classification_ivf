@@ -31,6 +31,8 @@ def collect_predictions(model, loader, device):
     collect_icm = None
     collect_te = None
     model.eval()
+    probs = torch.empty(0)
+    batch_size = 0
     with torch.no_grad():
         for batch in loader:
             images = batch["image"].to(device)
@@ -49,13 +51,14 @@ def collect_predictions(model, loader, device):
                 logits_exp = None
                 logits_icm = None
                 logits_te = None
+            probs = torch.empty(0)
             if logits_quality is not None:
                 probs = torch.sigmoid(logits_quality)
                 probs_list.append(probs.cpu())
                 targets_list.append(batch["label"].cpu())
             image_paths.extend(batch["image_path"])
 
-            batch_size = probs.shape[0]
+            batch_size = len(batch["image_path"])
             if collect_stage is None:
                 collect_stage = logits_stage is not None
             if collect_stage:
@@ -211,11 +214,11 @@ def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5):
     if test_probs.numel() > 0 and test_targets.numel() > 0:
         test_metrics = compute_metrics_at_threshold(test_probs, test_targets, best_t)
 
-    preds = (test_probs >= best_t).int().tolist()
+    preds = (test_probs >= best_t).int().tolist() if test_probs.numel() else [-1] * len(test_paths)
     pred_data = {
         "image_path": test_paths,
-        "y_true": test_targets.int().tolist(),
-        "y_prob": test_probs.tolist(),
+        "y_true": test_targets.int().tolist() if test_targets.numel() else [-1] * len(test_paths),
+        "y_prob": test_probs.tolist() if test_probs.numel() else [None] * len(test_paths),
         "y_pred": preds,
     }
     if stage_preds is not None:
