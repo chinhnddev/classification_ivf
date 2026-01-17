@@ -7,6 +7,13 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision.models import resnet50, efficientnet_b0
+
+try:
+    from torchvision.models import ResNet50_Weights, EfficientNet_B0_Weights
+except ImportError:  # pragma: no cover - older torchvision
+    ResNet50_Weights = None
+    EfficientNet_B0_Weights = None
 
 
 # -------------------------
@@ -202,6 +209,43 @@ class IVFConvNeXtLite(nn.Module):
         return x.squeeze(1)                 # [B] logits
 
 
+class BinaryLogitsWrapper(nn.Module):
+    def __init__(self, backbone: nn.Module):
+        super().__init__()
+        self.backbone = backbone
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        logits = self.backbone(x)
+        if logits.ndim == 2 and logits.shape[1] == 1:
+            logits = logits.squeeze(1)
+        return logits
+
+
+def build_resnet50_baseline(pretrained: bool, dropout: float) -> nn.Module:
+    if ResNet50_Weights is not None:
+        weights = ResNet50_Weights.DEFAULT if pretrained else None
+        model = resnet50(weights=weights)
+    else:
+        model = resnet50(pretrained=pretrained)
+    in_features = model.fc.in_features
+    if dropout and dropout > 0:
+        model.fc = nn.Sequential(nn.Dropout(p=dropout), nn.Linear(in_features, 1))
+    else:
+        model.fc = nn.Linear(in_features, 1)
+    return BinaryLogitsWrapper(model)
+
+
+def build_efficientnet_b0_baseline(pretrained: bool, dropout: float) -> nn.Module:
+    if EfficientNet_B0_Weights is not None:
+        weights = EfficientNet_B0_Weights.DEFAULT if pretrained else None
+        model = efficientnet_b0(weights=weights)
+    else:
+        model = efficientnet_b0(pretrained=pretrained)
+    in_features = model.classifier[-1].in_features
+    model.classifier = nn.Sequential(nn.Dropout(p=dropout), nn.Linear(in_features, 1))
+    return BinaryLogitsWrapper(model)
+
+
 # -------------------------
 # build_model(cfg)
 # -------------------------
@@ -221,16 +265,31 @@ def build_model(cfg):
     """
     Expected cfg structure (minimal):
       cfg.model.name: "ivf_convnext_lite" (default)
+        - "resnet50_baseline"
+        - "efficientnet_b0_baseline"
       cfg.model.dropout: head dropout
+      cfg.model.pretrained: false
       cfg.model.stem_stride: 2 or 4
       cfg.model.dims: [64,128,256,512]
       cfg.model.depths: [2,2,6,2]
       cfg.model.drop_path_rate: 0.1
+
+    Baseline examples:
+      model:
+        name: resnet50_baseline
+        dropout: 0.2
+        pretrained: false
+
+      model:
+        name: efficientnet_b0_baseline
+        dropout: 0.2
+        pretrained: false
     """
     model_cfg = _cfg_get(cfg, "model", cfg)
 
     name = str(_cfg_get(model_cfg, "name", "ivf_convnext_lite")).lower()
     head_dropout = float(_cfg_get(model_cfg, "dropout", 0.2))
+    pretrained = bool(_cfg_get(model_cfg, "pretrained", False))
     stem_stride = int(_cfg_get(model_cfg, "stem_stride", 2))  # for IVF, 2 often better than 4
     drop_path_rate = float(_cfg_get(model_cfg, "drop_path_rate", 0.1))
 
@@ -249,5 +308,9 @@ def build_model(cfg):
             layer_scale_init=layer_scale_init,
             stem_stride=stem_stride,
         )
+    if name == "resnet50_baseline":
+        return build_resnet50_baseline(pretrained=pretrained, dropout=head_dropout)
+    if name == "efficientnet_b0_baseline":
+        return build_efficientnet_b0_baseline(pretrained=pretrained, dropout=head_dropout)
 
     raise ValueError(f"Unknown model name: {name}")
