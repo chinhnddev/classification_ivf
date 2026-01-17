@@ -148,7 +148,7 @@ class HVEmbryoDataset(Dataset):
         if "day" in row.index:
             day_value = int(row["day"])
         else:
-            day_value = 0
+            day_value = -1
         day = torch.tensor(day_value, dtype=torch.long)
         return {
             "image": img,
@@ -167,6 +167,7 @@ class HVDataModule(pl.LightningDataModule):
         self.data_root = cfg.data.data_root
         self.overfit_n = int(overfit_n)
         self.disable_augment = self.overfit_n > 0
+        self.eval_external = bool(getattr(cfg.data, "eval_external", False))
         self.train_df = None
         self.val_df = None
         self.test_df = None
@@ -176,7 +177,11 @@ class HVDataModule(pl.LightningDataModule):
         df = pd.read_csv(self.csv_path)
         df = normalize_labels(df)
 
-        if self.overfit_n > 0:
+        if self.eval_external:
+            self.test_df = df.reset_index(drop=True)
+            self.train_df = pd.DataFrame(columns=df.columns)
+            self.val_df = pd.DataFrame(columns=df.columns)
+        elif self.overfit_n > 0:
             n = min(self.overfit_n, len(df))
             df = df.sample(n=n, random_state=self.seed).reset_index(drop=True)
             self.train_df = df.copy()
@@ -191,26 +196,36 @@ class HVDataModule(pl.LightningDataModule):
                 self.cfg.data.test_frac,
             )
 
-        self.pos_weight = compute_pos_weight(self.train_df)
+        if self.eval_external:
+            self.pos_weight = compute_pos_weight(self.test_df)
+        else:
+            self.pos_weight = compute_pos_weight(self.train_df)
 
-        self.train_ds = HVEmbryoDataset(
-            self.train_df,
-            self.data_root,
-            transform=build_transforms(self.cfg, is_train=True, disable_augment=self.disable_augment),
+        train_transform = build_transforms(
+            self.cfg,
+            is_train=not self.eval_external,
+            disable_augment=self.disable_augment or self.eval_external,
         )
-        self.val_ds = HVEmbryoDataset(
-            self.val_df,
-            self.data_root,
-            transform=build_transforms(self.cfg, is_train=False),
-        )
+        eval_transform = build_transforms(self.cfg, is_train=False)
+
+        self.train_ds = HVEmbryoDataset(self.train_df, self.data_root, transform=train_transform)
+        self.val_ds = HVEmbryoDataset(self.val_df, self.data_root, transform=eval_transform)
         self.test_ds = HVEmbryoDataset(
             self.test_df,
             self.data_root,
-            transform=build_transforms(self.cfg, is_train=False),
+            transform=eval_transform,
         )
         self._log_dataset_summary()
 
     def _log_dataset_summary(self):
+        if self.eval_external:
+            counts = self.test_df["label"].value_counts().to_dict()
+            good = int(counts.get(1, 0))
+            poor = int(counts.get(0, 0))
+            print(f"[data] external size: {len(self.test_df)}")
+            print(f"[data] external good/poor: {good}/{poor}")
+            return
+
         def _counts(frame):
             counts = frame["label"].value_counts().to_dict()
             good = int(counts.get(1, 0))

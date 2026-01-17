@@ -91,6 +91,13 @@ class LitClassifier(pl.LightningModule):
         self.val_probs = []
         self.val_targets = []
 
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint["best_threshold"] = float(self.best_threshold)
+
+    def on_load_checkpoint(self, checkpoint):
+        if "best_threshold" in checkpoint:
+            self.best_threshold = float(checkpoint["best_threshold"])
+
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
             self.parameters(),

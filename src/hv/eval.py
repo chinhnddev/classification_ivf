@@ -3,9 +3,10 @@ import json
 from pathlib import Path
 import torch
 import pandas as pd
+from torchmetrics.functional.classification import binary_auroc, binary_average_precision
 
 from hv.dataset import HVDataModule
-from hv.metrics import find_best_threshold, compute_metrics
+from hv.metrics import find_best_threshold, accuracy_at_threshold, f1_score_at_threshold
 from hv.train import LitClassifier
 from hv.utils import load_config, ensure_dir, set_seed
 
@@ -28,6 +29,20 @@ def collect_predictions(model, loader, device):
     return probs, targets, image_paths
 
 
+def compute_metrics_at_threshold(probs, targets, threshold):
+    targets_int = targets.int()
+    auroc = binary_auroc(probs, targets_int).item()
+    auprc = binary_average_precision(probs, targets_int).item()
+    acc = accuracy_at_threshold(probs, targets, threshold)
+    f1 = f1_score_at_threshold(probs, targets, threshold)
+    return {"auroc": auroc, "auprc": auprc, "acc": acc, "f1": f1}
+
+
+def load_threshold_from_ckpt(ckpt_path):
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    return ckpt.get("best_threshold")
+
+
 def resolve_config(ckpt_path, config_path=None):
     if config_path:
         return load_config(config_path)
@@ -39,7 +54,7 @@ def resolve_config(ckpt_path, config_path=None):
     raise FileNotFoundError("config.yaml not found near checkpoint; pass --config explicitly.")
 
 
-def run_eval(cfg, ckpt_path):
+def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5):
     set_seed(cfg.seed)
     dm = HVDataModule(cfg, overfit_n=0)
     dm.setup()
@@ -49,12 +64,21 @@ def run_eval(cfg, ckpt_path):
     model.to(device)
 
     val_probs, val_targets, _ = collect_predictions(model, dm.val_dataloader(), device)
-    best_t, best_f1 = find_best_threshold(val_probs, val_targets)
-    val_metrics = compute_metrics(val_probs, val_targets, best_t)
+    if threshold_source == "scan":
+        best_t, best_f1 = find_best_threshold(val_probs, val_targets)
+    else:
+        best_t = float(fixed_threshold)
+        if threshold_source == "ckpt":
+            ckpt_threshold = load_threshold_from_ckpt(ckpt_path)
+            if ckpt_threshold is not None:
+                best_t = float(ckpt_threshold)
+        best_f1 = f1_score_at_threshold(val_probs, val_targets, best_t)
+
+    val_metrics = compute_metrics_at_threshold(val_probs, val_targets, best_t)
     val_metrics["f1"] = best_f1
 
     test_probs, test_targets, test_paths = collect_predictions(model, dm.test_dataloader(), device)
-    test_metrics = compute_metrics(test_probs, test_targets, best_t)
+    test_metrics = compute_metrics_at_threshold(test_probs, test_targets, best_t)
 
     preds = (test_probs >= best_t).int().tolist()
     pred_df = pd.DataFrame(
@@ -94,13 +118,19 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", required=True)
     parser.add_argument("--config", default=None)
+    parser.add_argument(
+        "--threshold_source",
+        choices=["scan", "ckpt", "fixed"],
+        default="scan",
+    )
+    parser.add_argument("--fixed_threshold", type=float, default=0.5)
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     cfg = resolve_config(args.ckpt, args.config)
-    run_eval(cfg, args.ckpt)
+    run_eval(cfg, args.ckpt, threshold_source=args.threshold_source, fixed_threshold=args.fixed_threshold)
 
 
 if __name__ == "__main__":
