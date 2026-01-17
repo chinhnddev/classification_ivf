@@ -186,6 +186,7 @@ class HVDataModule(pl.LightningDataModule):
         self.overfit_n = int(overfit_n)
         self.disable_augment = self.overfit_n > 0
         self.eval_external = bool(getattr(cfg.data, "eval_external", False))
+        self.use_predefined_split = bool(getattr(cfg.data, "use_predefined_split", False))
         self.train_df = None
         self.val_df = None
         self.test_df = None
@@ -205,6 +206,12 @@ class HVDataModule(pl.LightningDataModule):
             self.train_df = df.copy()
             self.val_df = df.copy()
             self.test_df = df.copy()
+        elif self.use_predefined_split:
+            if "split" not in df.columns:
+                raise KeyError("Expected 'split' column for predefined split.")
+            self.train_df = df[df["split"] == "train"].reset_index(drop=True)
+            self.val_df = df[df["split"] == "val"].reset_index(drop=True)
+            self.test_df = df[df["split"] == "test"].reset_index(drop=True)
         else:
             self.train_df, self.val_df, self.test_df = stratified_split(
                 df,

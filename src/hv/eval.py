@@ -17,6 +17,8 @@ def collect_predictions(model, loader, device):
     image_paths = []
     stage_preds = []
     morph_preds = []
+    stage_targets = []
+    morph_targets = []
     collect_stage = None
     collect_morph = None
     model.eval()
@@ -45,6 +47,8 @@ def collect_predictions(model, loader, device):
                     stage_preds.extend(torch.argmax(logits_stage, dim=1).cpu().tolist())
                 else:
                     stage_preds.extend([-1] * batch_size)
+                if "stage" in batch:
+                    stage_targets.extend(batch["stage"].cpu().tolist())
 
             if collect_morph is None:
                 collect_morph = logits_morph is not None
@@ -53,12 +57,16 @@ def collect_predictions(model, loader, device):
                     morph_preds.extend(torch.argmax(logits_morph, dim=1).cpu().tolist())
                 else:
                     morph_preds.extend([-1] * batch_size)
+                if "morph" in batch:
+                    morph_targets.extend(batch["morph"].cpu().tolist())
 
     probs = torch.cat(probs_list) if probs_list else torch.empty(0)
     targets = torch.cat(targets_list).float() if targets_list else torch.empty(0)
     stage_out = stage_preds if collect_stage else None
     morph_out = morph_preds if collect_morph else None
-    return probs, targets, image_paths, stage_out, morph_out
+    stage_true = stage_targets if collect_stage and stage_targets else None
+    morph_true = morph_targets if collect_morph and morph_targets else None
+    return probs, targets, image_paths, stage_out, morph_out, stage_true, morph_true
 
 
 def compute_metrics_at_threshold(probs, targets, threshold):
@@ -95,7 +103,7 @@ def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5):
     model = LitClassifier.load_from_checkpoint(ckpt_path, cfg=cfg, pos_weight=dm.pos_weight)
     model.to(device)
 
-    val_probs, val_targets, _, _, _ = collect_predictions(model, dm.val_dataloader(), device)
+    val_probs, val_targets, _, _, _, _, _ = collect_predictions(model, dm.val_dataloader(), device)
     if threshold_source == "scan":
         best_t, best_f1 = find_best_threshold(val_probs, val_targets)
     else:
@@ -109,7 +117,7 @@ def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5):
     val_metrics = compute_metrics_at_threshold(val_probs, val_targets, best_t)
     val_metrics["f1"] = best_f1
 
-    test_probs, test_targets, test_paths, stage_preds, morph_preds = collect_predictions(
+    test_probs, test_targets, test_paths, stage_preds, morph_preds, stage_true, morph_true = collect_predictions(
         model, dm.test_dataloader(), device
     )
     test_metrics = compute_metrics_at_threshold(test_probs, test_targets, best_t)
@@ -126,6 +134,20 @@ def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5):
     if morph_preds is not None:
         pred_data["morph_pred"] = morph_preds
     pred_df = pd.DataFrame(pred_data)
+
+    if stage_preds is not None and stage_true is not None:
+        stage_true_t = torch.tensor(stage_true)
+        stage_pred_t = torch.tensor(stage_preds)
+        valid = stage_true_t != -1
+        if valid.any():
+            test_metrics["stage_acc"] = float((stage_pred_t[valid] == stage_true_t[valid]).float().mean().item())
+
+    if morph_preds is not None and morph_true is not None:
+        morph_true_t = torch.tensor(morph_true)
+        morph_pred_t = torch.tensor(morph_preds)
+        valid = morph_true_t != -1
+        if valid.any():
+            test_metrics["morph_acc"] = float((morph_pred_t[valid] == morph_true_t[valid]).float().mean().item())
 
     output_dir = Path(cfg.logging.output_dir)
     ensure_dir(output_dir)
