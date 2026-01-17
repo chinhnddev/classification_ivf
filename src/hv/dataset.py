@@ -145,7 +145,11 @@ class HVEmbryoDataset(Dataset):
         if self.transform is not None:
             img = self.transform(img)
         label = torch.tensor(float(row["label"]), dtype=torch.float32)
-        day = torch.tensor(int(row["day"]), dtype=torch.long)
+        if "day" in row.index:
+            day_value = int(row["day"])
+        else:
+            day_value = 0
+        day = torch.tensor(day_value, dtype=torch.long)
         return {
             "image": img,
             "label": label,

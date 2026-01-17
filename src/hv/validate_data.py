@@ -22,12 +22,13 @@ def validate(csv_path, data_root):
             missing.append(rel)
 
     label_counts = df["label"].value_counts().to_dict()
-    day_counts = df["day"].value_counts().to_dict()
+    day_counts = df["day"].value_counts().to_dict() if "day" in df.columns else None
     embryo_count = df["embryo_id"].nunique() if "embryo_id" in df.columns else 0
 
     print(f"Total samples: {len(df)}")
     print(f"Label counts: {label_counts}")
-    print(f"Day counts: {day_counts}")
+    if day_counts is not None:
+        print(f"Day counts: {day_counts}")
     if "embryo_id" in df.columns:
         print(f"Unique embryo_id: {embryo_count}")
     print(f"Missing files: {len(missing)}")
