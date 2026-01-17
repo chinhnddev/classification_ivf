@@ -112,7 +112,7 @@ def normalize_labels(df):
     return df
 
 
-MISSING_TOKENS = {"", "0", "ND", "NA", "N/A"}
+MISSING_TOKENS = {"", "0", "ND", "NA", "N/A", "NAN", "NULL", "NONE"}
 GARDNER_RE = re.compile(r"^([1-6])([ABC])([ABC])$")
 
 
@@ -187,6 +187,19 @@ def _parse_gardner(value):
     icm = match.group(2)
     te = match.group(3)
     return exp, icm, te
+
+
+def _parse_day(value):
+    token = _normalize_token(value)
+    if token is None:
+        return -1
+    if isinstance(token, (int, float)):
+        return int(token)
+    if isinstance(token, str):
+        match = re.search(r"(\d+)", token)
+        if match:
+            return int(match.group(1))
+    return -1
 
 
 def prepare_morphology_df(df):
@@ -320,11 +333,7 @@ class HVEmbryoDataset(Dataset):
             label_value = -1.0
         label = torch.tensor(label_value, dtype=torch.float32)
         if "day" in row.index:
-            day_raw = row["day"]
-            if pd.isna(day_raw):
-                day_value = -1
-            else:
-                day_value = int(day_raw)
+            day_value = _parse_day(row["day"])
         else:
             day_value = -1
         day = torch.tensor(day_value, dtype=torch.long)
