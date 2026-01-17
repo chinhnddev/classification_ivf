@@ -2,7 +2,7 @@ seed: 0
 
 data:
   csv_path: data/metadata/blastocyst.csv
-  data_root: data
+  data_root: data/blastocyst_Dataset
   task: morphology
   use_predefined_split: true
 

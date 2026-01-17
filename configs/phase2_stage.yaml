@@ -2,7 +2,7 @@ seed: 0
 
 data:
   csv_path: data/metadata/humanembryo2.csv
-  data_root: data
+  data_root: data/HumanEmbryo2.0
   task: stage
   use_predefined_split: true
 
