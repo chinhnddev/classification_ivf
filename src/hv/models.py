@@ -341,6 +341,51 @@ class IVFMultiTaskHead(nn.Module):
         }
 
 
+class IVFMorphStageHead(nn.Module):
+    def __init__(
+        self,
+        encoder: nn.Module,
+        feat_dim: int,
+        dropout: float,
+        enable_quality: bool,
+        enable_stage: bool,
+        enable_morph: bool,
+        num_stage_classes: int,
+        num_exp_classes: int,
+        num_icm_classes: int,
+        num_te_classes: int,
+    ):
+        super().__init__()
+        self.encoder = encoder
+        self.dropout = nn.Dropout(p=dropout) if dropout and dropout > 0 else nn.Identity()
+        self.quality_head = nn.Linear(feat_dim, 1) if enable_quality else None
+        self.stage_head = nn.Linear(feat_dim, num_stage_classes) if enable_stage else None
+        if enable_morph:
+            self.exp_head = nn.Linear(feat_dim, num_exp_classes)
+            self.icm_head = nn.Linear(feat_dim, num_icm_classes)
+            self.te_head = nn.Linear(feat_dim, num_te_classes)
+        else:
+            self.exp_head = None
+            self.icm_head = None
+            self.te_head = None
+
+    def forward(self, x: torch.Tensor) -> dict:
+        feats = self.encoder(x)
+        feats = self.dropout(feats)
+        logits_quality = self.quality_head(feats).squeeze(1) if self.quality_head is not None else None
+        logits_stage = self.stage_head(feats) if self.stage_head is not None else None
+        logits_exp = self.exp_head(feats) if self.exp_head is not None else None
+        logits_icm = self.icm_head(feats) if self.icm_head is not None else None
+        logits_te = self.te_head(feats) if self.te_head is not None else None
+        return {
+            "logits_quality": logits_quality,
+            "logits_stage": logits_stage,
+            "logits_exp": logits_exp,
+            "logits_icm": logits_icm,
+            "logits_te": logits_te,
+        }
+
+
 class BinaryLogitsWrapper(nn.Module):
     def __init__(self, backbone: nn.Module):
         super().__init__()
@@ -420,6 +465,7 @@ def build_model(cfg):
         - "resnet50_baseline"
         - "efficientnet_b0_baseline"
         - "ivf_multitask_head"
+        - "ivf_morph_stage_head"
       cfg.model.dropout: head dropout
       cfg.model.pretrained: false
       cfg.model.stem_stride: 2 or 4
@@ -501,6 +547,49 @@ def build_model(cfg):
             enable_morph=enable_morph,
             num_stage_classes=num_stage_classes,
             num_morph_classes=num_morph_classes,
+        )
+    if name == "ivf_morph_stage_head":
+        backbone_name = str(_cfg_get(model_cfg, "backbone", "ivf_convnext_lite")).lower()
+        enable_quality = bool(_cfg_get(model_cfg, "enable_quality", True))
+        enable_stage = bool(_cfg_get(model_cfg, "enable_stage", True))
+        enable_morph = bool(_cfg_get(model_cfg, "enable_morph", True))
+        num_stage_classes = int(_cfg_get(model_cfg, "num_stage_classes", 0))
+        num_exp_classes = int(_cfg_get(model_cfg, "num_exp_classes", 6))
+        num_icm_classes = int(_cfg_get(model_cfg, "num_icm_classes", 3))
+        num_te_classes = int(_cfg_get(model_cfg, "num_te_classes", 3))
+        if enable_stage and num_stage_classes < 2:
+            raise ValueError("enable_stage requires num_stage_classes >= 2")
+        if enable_morph and (num_exp_classes < 2 or num_icm_classes < 2 or num_te_classes < 2):
+            raise ValueError("enable_morph requires exp/icm/te classes >= 2")
+
+        if backbone_name in ("ivf_convnext_lite", "convnext_lite", "ivf_cnn_best"):
+            encoder = IVFConvNeXtLiteEncoder(
+                dims=dims,
+                depths=depths,
+                mlp_ratio=mlp_ratio,
+                drop_path_rate=drop_path_rate,
+                layer_scale_init=layer_scale_init,
+                stem_stride=stem_stride,
+            )
+            feat_dim = encoder.out_dim
+        elif backbone_name in ("resnet50", "resnet50_baseline"):
+            encoder, feat_dim = build_resnet50_encoder(pretrained=pretrained)
+        elif backbone_name in ("efficientnet_b0", "efficientnet_b0_baseline"):
+            encoder, feat_dim = build_efficientnet_b0_encoder(pretrained=pretrained)
+        else:
+            raise ValueError(f"Unknown morph-stage backbone: {backbone_name}")
+
+        return IVFMorphStageHead(
+            encoder=encoder,
+            feat_dim=feat_dim,
+            dropout=head_dropout,
+            enable_quality=enable_quality,
+            enable_stage=enable_stage,
+            enable_morph=enable_morph,
+            num_stage_classes=num_stage_classes,
+            num_exp_classes=num_exp_classes,
+            num_icm_classes=num_icm_classes,
+            num_te_classes=num_te_classes,
         )
 
     raise ValueError(f"Unknown model name: {name}")

@@ -37,56 +37,150 @@ class LitClassifier(pl.LightningModule):
         self.val_targets = []
         self.best_threshold = 0.5
         model_cfg = _cfg_get(cfg, "model", cfg)
+        self.enable_quality = bool(_cfg_get(model_cfg, "enable_quality", True))
         self.enable_stage = bool(_cfg_get(model_cfg, "enable_stage", False))
         self.enable_morph = bool(_cfg_get(model_cfg, "enable_morph", False))
         weights_cfg = _cfg_get(_cfg_get(cfg, "training", cfg), "loss_weights", None)
         self.loss_w_quality = float(_cfg_get(weights_cfg, "quality", 1.0))
         self.loss_w_stage = float(_cfg_get(weights_cfg, "stage", 0.3))
         self.loss_w_morph = float(_cfg_get(weights_cfg, "morph", 0.3))
+        self.loss_w_exp = float(_cfg_get(weights_cfg, "exp", 1.0))
+        self.loss_w_icm = float(_cfg_get(weights_cfg, "icm", 1.0))
+        self.loss_w_te = float(_cfg_get(weights_cfg, "te", 1.0))
+        training_cfg = _cfg_get(cfg, "training", cfg)
+        self.task = str(_cfg_get(training_cfg, "task", "quality")).lower()
+        self.freeze_encoder_ratio = float(_cfg_get(training_cfg, "freeze_encoder_ratio", 0.0))
+        self.unfreeze_epochs = int(_cfg_get(training_cfg, "unfreeze_epochs", 0))
+        self.initial_freeze_ratio = self.freeze_encoder_ratio
         self.loss_stage_fn = nn.CrossEntropyLoss(ignore_index=-1)
         self.loss_morph_fn = nn.CrossEntropyLoss(ignore_index=-1)
+        self.loss_exp_fn = nn.CrossEntropyLoss(ignore_index=-1)
+        self.loss_icm_fn = nn.CrossEntropyLoss(ignore_index=-1)
+        self.loss_te_fn = nn.CrossEntropyLoss(ignore_index=-1)
         self.stage_correct = 0
         self.stage_total = 0
         self.morph_correct = 0
         self.morph_total = 0
+        self.exp_correct = 0
+        self.exp_total = 0
+        self.icm_correct = 0
+        self.icm_total = 0
+        self.te_correct = 0
+        self.te_total = 0
+        self._apply_freeze_policy()
 
     def forward(self, x):
         return self.model(x)
 
+    def _apply_freeze_policy(self):
+        if self.task == "morphology":
+            self._freeze_if_exists(["stage_head", "quality_head"])
+        elif self.task == "stage":
+            self._freeze_if_exists(["exp_head", "icm_head", "te_head", "morph_head", "quality_head"])
+        elif self.task == "quality":
+            self._freeze_if_exists(["stage_head", "exp_head", "icm_head", "te_head", "morph_head"])
+        if self.task == "stage" and self.freeze_encoder_ratio > 0:
+            self._set_encoder_freeze_ratio(self.freeze_encoder_ratio)
+
+    def _freeze_if_exists(self, names):
+        for name in names:
+            module = getattr(self.model, name, None)
+            if module is None:
+                continue
+            for param in module.parameters():
+                param.requires_grad = False
+
+    def _set_encoder_freeze_ratio(self, ratio):
+        encoder = getattr(self.model, "encoder", None)
+        if encoder is None:
+            return
+        params = list(encoder.parameters())
+        if not params:
+            return
+        n_freeze = int(len(params) * ratio)
+        for idx, param in enumerate(params):
+            param.requires_grad = idx >= n_freeze
+
+    def on_train_epoch_start(self):
+        if self.task != "stage":
+            return
+        if self.unfreeze_epochs <= 0:
+            return
+        ratio = max(self.initial_freeze_ratio * (1.0 - self.current_epoch / self.unfreeze_epochs), 0.0)
+        self._set_encoder_freeze_ratio(ratio)
+
     def _unpack_outputs(self, outputs):
         if isinstance(outputs, dict):
-            return outputs
-        return {"logits_quality": outputs, "logits_stage": None, "logits_morph": None}
+            return {
+                "logits_quality": outputs.get("logits_quality"),
+                "logits_stage": outputs.get("logits_stage"),
+                "logits_morph": outputs.get("logits_morph"),
+                "logits_exp": outputs.get("logits_exp"),
+                "logits_icm": outputs.get("logits_icm"),
+                "logits_te": outputs.get("logits_te"),
+            }
+        return {
+            "logits_quality": outputs,
+            "logits_stage": None,
+            "logits_morph": None,
+            "logits_exp": None,
+            "logits_icm": None,
+            "logits_te": None,
+        }
 
     def training_step(self, batch, batch_idx):
         outputs = self(batch["image"])
         outputs = self._unpack_outputs(outputs)
         logits = outputs["logits_quality"]
-        targets = batch["label"].float()
-        loss_quality = self.loss_fn(logits, targets)
-        loss = self.loss_w_quality * loss_quality
-        if self.enable_stage and outputs["logits_stage"] is not None and "stage" in batch:
+        loss = 0.0
+
+        if self.task in {"quality", "all"} and logits is not None and "label" in batch:
+            targets = batch["label"].float()
+            loss_quality = self.loss_fn(logits, targets)
+            loss = loss + self.loss_w_quality * loss_quality
+            probs = torch.sigmoid(logits)
+            self.train_acc.update(probs, targets.int())
+        if self.task in {"stage", "all"} and self.enable_stage and outputs["logits_stage"] is not None and "stage" in batch:
             stage_targets = batch["stage"].long()
             if (stage_targets != -1).any():
                 loss_stage = self.loss_stage_fn(outputs["logits_stage"], stage_targets)
                 loss = loss + self.loss_w_stage * loss_stage
-        if self.enable_morph and outputs["logits_morph"] is not None and "morph" in batch:
-            morph_targets = batch["morph"].long()
-            if (morph_targets != -1).any():
-                loss_morph = self.loss_morph_fn(outputs["logits_morph"], morph_targets)
-                loss = loss + self.loss_w_morph * loss_morph
-        probs = torch.sigmoid(logits)
-        self.train_acc.update(probs, targets.int())
-        batch_size = targets.shape[0]
+        if self.task in {"morphology", "all"} and self.enable_morph:
+            if outputs["logits_morph"] is not None and "morph" in batch:
+                morph_targets = batch["morph"].long()
+                if (morph_targets != -1).any():
+                    loss_morph = self.loss_morph_fn(outputs["logits_morph"], morph_targets)
+                    loss = loss + self.loss_w_morph * loss_morph
+            if outputs["logits_exp"] is not None and "exp" in batch:
+                exp_targets = batch["exp"].long()
+                if (exp_targets != -1).any():
+                    loss_exp = self.loss_exp_fn(outputs["logits_exp"], exp_targets)
+                    loss = loss + self.loss_w_exp * loss_exp
+            if outputs["logits_icm"] is not None and "icm" in batch:
+                icm_targets = batch["icm"].long()
+                if (icm_targets != -1).any():
+                    loss_icm = self.loss_icm_fn(outputs["logits_icm"], icm_targets)
+                    loss = loss + self.loss_w_icm * loss_icm
+            if outputs["logits_te"] is not None and "te" in batch:
+                te_targets = batch["te"].long()
+                if (te_targets != -1).any():
+                    loss_te = self.loss_te_fn(outputs["logits_te"], te_targets)
+                    loss = loss + self.loss_w_te * loss_te
+
+        if not isinstance(loss, torch.Tensor):
+            loss = torch.tensor(float(loss), device=self.device)
+
+        batch_size = batch["image"].shape[0]
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch_size)
-        self.log(
-            "train_acc",
-            self.train_acc,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            batch_size=batch_size,
-        )
+        if self.task in {"quality", "all"} and logits is not None and "label" in batch:
+            self.log(
+                "train_acc",
+                self.train_acc,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                batch_size=batch_size,
+            )
         return loss
 
     def on_train_epoch_end(self):
@@ -96,10 +190,18 @@ class LitClassifier(pl.LightningModule):
         outputs = self(batch["image"])
         outputs = self._unpack_outputs(outputs)
         logits = outputs["logits_quality"]
-        targets = batch["label"].float()
-        loss_quality = self.loss_fn(logits, targets)
-        loss = self.loss_w_quality * loss_quality
-        if self.enable_stage and outputs["logits_stage"] is not None and "stage" in batch:
+        loss = 0.0
+        if self.task in {"quality", "all"} and logits is not None and "label" in batch:
+            targets = batch["label"].float()
+            loss_quality = self.loss_fn(logits, targets)
+            loss = loss + self.loss_w_quality * loss_quality
+            probs = torch.sigmoid(logits)
+            self.val_acc.update(probs, targets.int())
+            self.val_auroc.update(probs, targets.int())
+            self.val_auprc.update(probs, targets.int())
+            self.val_probs.append(probs.detach().cpu())
+            self.val_targets.append(targets.detach().cpu())
+        if self.task in {"stage", "all"} and self.enable_stage and outputs["logits_stage"] is not None and "stage" in batch:
             stage_targets = batch["stage"].long()
             if (stage_targets != -1).any():
                 loss_stage = self.loss_stage_fn(outputs["logits_stage"], stage_targets)
@@ -108,46 +210,76 @@ class LitClassifier(pl.LightningModule):
                 valid = stage_targets != -1
                 self.stage_correct += int((stage_preds[valid] == stage_targets[valid]).sum().item())
                 self.stage_total += int(valid.sum().item())
-        if self.enable_morph and outputs["logits_morph"] is not None and "morph" in batch:
-            morph_targets = batch["morph"].long()
-            if (morph_targets != -1).any():
-                loss_morph = self.loss_morph_fn(outputs["logits_morph"], morph_targets)
-                loss = loss + self.loss_w_morph * loss_morph
-                morph_preds = torch.argmax(outputs["logits_morph"], dim=1)
-                valid = morph_targets != -1
-                self.morph_correct += int((morph_preds[valid] == morph_targets[valid]).sum().item())
-                self.morph_total += int(valid.sum().item())
-        probs = torch.sigmoid(logits)
-        self.val_acc.update(probs, targets.int())
-        self.val_auroc.update(probs, targets.int())
-        self.val_auprc.update(probs, targets.int())
-        self.val_probs.append(probs.detach().cpu())
-        self.val_targets.append(targets.detach().cpu())
-        batch_size = targets.shape[0]
+        if self.task in {"morphology", "all"} and self.enable_morph:
+            if outputs["logits_morph"] is not None and "morph" in batch:
+                morph_targets = batch["morph"].long()
+                if (morph_targets != -1).any():
+                    loss_morph = self.loss_morph_fn(outputs["logits_morph"], morph_targets)
+                    loss = loss + self.loss_w_morph * loss_morph
+                    morph_preds = torch.argmax(outputs["logits_morph"], dim=1)
+                    valid = morph_targets != -1
+                    self.morph_correct += int((morph_preds[valid] == morph_targets[valid]).sum().item())
+                    self.morph_total += int(valid.sum().item())
+            if outputs["logits_exp"] is not None and "exp" in batch:
+                exp_targets = batch["exp"].long()
+                if (exp_targets != -1).any():
+                    loss_exp = self.loss_exp_fn(outputs["logits_exp"], exp_targets)
+                    loss = loss + self.loss_w_exp * loss_exp
+                    exp_preds = torch.argmax(outputs["logits_exp"], dim=1)
+                    valid = exp_targets != -1
+                    self.exp_correct += int((exp_preds[valid] == exp_targets[valid]).sum().item())
+                    self.exp_total += int(valid.sum().item())
+            if outputs["logits_icm"] is not None and "icm" in batch:
+                icm_targets = batch["icm"].long()
+                if (icm_targets != -1).any():
+                    loss_icm = self.loss_icm_fn(outputs["logits_icm"], icm_targets)
+                    loss = loss + self.loss_w_icm * loss_icm
+                    icm_preds = torch.argmax(outputs["logits_icm"], dim=1)
+                    valid = icm_targets != -1
+                    self.icm_correct += int((icm_preds[valid] == icm_targets[valid]).sum().item())
+                    self.icm_total += int(valid.sum().item())
+            if outputs["logits_te"] is not None and "te" in batch:
+                te_targets = batch["te"].long()
+                if (te_targets != -1).any():
+                    loss_te = self.loss_te_fn(outputs["logits_te"], te_targets)
+                    loss = loss + self.loss_w_te * loss_te
+                    te_preds = torch.argmax(outputs["logits_te"], dim=1)
+                    valid = te_targets != -1
+                    self.te_correct += int((te_preds[valid] == te_targets[valid]).sum().item())
+                    self.te_total += int(valid.sum().item())
+
+        if not isinstance(loss, torch.Tensor):
+            loss = torch.tensor(float(loss), device=self.device)
+        batch_size = batch["image"].shape[0]
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
         return loss
 
     def on_validation_epoch_end(self):
-        if not self.val_probs:
-            return
-        probs = torch.cat(self.val_probs)
-        targets = torch.cat(self.val_targets)
-        best_t, best_f1 = find_best_threshold(probs, targets)
-        self.best_threshold = best_t
+        if self.val_probs:
+            probs = torch.cat(self.val_probs)
+            targets = torch.cat(self.val_targets)
+            best_t, best_f1 = find_best_threshold(probs, targets)
+            self.best_threshold = best_t
 
-        val_acc = self.val_acc.compute()
-        val_auroc = self.val_auroc.compute()
-        val_auprc = self.val_auprc.compute()
+            val_acc = self.val_acc.compute()
+            val_auroc = self.val_auroc.compute()
+            val_auprc = self.val_auprc.compute()
 
-        self.log("val_acc", val_acc, prog_bar=True)
-        self.log("val_auroc", val_auroc, prog_bar=True)
-        self.log("val_auprc", val_auprc, prog_bar=True)
-        self.log("val_f1", torch.tensor(best_f1, device=self.device), prog_bar=True)
-        self.log("val_best_threshold", torch.tensor(best_t, device=self.device))
+            self.log("val_acc", val_acc, prog_bar=True)
+            self.log("val_auroc", val_auroc, prog_bar=True)
+            self.log("val_auprc", val_auprc, prog_bar=True)
+            self.log("val_f1", torch.tensor(best_f1, device=self.device), prog_bar=True)
+            self.log("val_best_threshold", torch.tensor(best_t, device=self.device))
         if self.stage_total > 0:
             self.log("val_stage_acc", self.stage_correct / self.stage_total, prog_bar=False)
         if self.morph_total > 0:
             self.log("val_morph_acc", self.morph_correct / self.morph_total, prog_bar=False)
+        if self.exp_total > 0:
+            self.log("val_exp_acc", self.exp_correct / self.exp_total, prog_bar=False)
+        if self.icm_total > 0:
+            self.log("val_icm_acc", self.icm_correct / self.icm_total, prog_bar=False)
+        if self.te_total > 0:
+            self.log("val_te_acc", self.te_correct / self.te_total, prog_bar=False)
 
         self.val_acc.reset()
         self.val_auroc.reset()
@@ -158,6 +290,12 @@ class LitClassifier(pl.LightningModule):
         self.stage_total = 0
         self.morph_correct = 0
         self.morph_total = 0
+        self.exp_correct = 0
+        self.exp_total = 0
+        self.icm_correct = 0
+        self.icm_total = 0
+        self.te_correct = 0
+        self.te_total = 0
 
     def on_save_checkpoint(self, checkpoint):
         checkpoint["best_threshold"] = float(self.best_threshold)
@@ -229,6 +367,10 @@ def run_training(cfg, overfit_n=0):
     )
 
     model = LitClassifier(cfg, pos_weight=dm.pos_weight)
+    init_ckpt = _cfg_get(_cfg_get(cfg, "training", cfg), "init_ckpt", None)
+    if init_ckpt:
+        state = torch.load(init_ckpt, map_location="cpu")
+        model.load_state_dict(state.get("state_dict", state), strict=False)
     trainer.fit(model, dm)
 
     return output_dir, ckpt_cb.best_model_path
@@ -239,6 +381,7 @@ def parse_args():
     parser.add_argument("--config", required=True)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--overfit_n", type=int, default=0)
+    parser.add_argument("--init_ckpt", default=None)
     return parser.parse_args()
 
 
@@ -247,6 +390,8 @@ def main():
     cfg = load_config(args.config)
     if args.seed is not None:
         cfg.seed = int(args.seed)
+    if args.init_ckpt is not None:
+        cfg.training.init_ckpt = args.init_ckpt
 
     output_dir, best_ckpt = run_training(cfg, overfit_n=args.overfit_n)
     print(f"Output dir: {output_dir}")

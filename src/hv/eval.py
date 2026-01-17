@@ -19,8 +19,17 @@ def collect_predictions(model, loader, device):
     morph_preds = []
     stage_targets = []
     morph_targets = []
+    exp_preds = []
+    icm_preds = []
+    te_preds = []
+    exp_targets = []
+    icm_targets = []
+    te_targets = []
     collect_stage = None
     collect_morph = None
+    collect_exp = None
+    collect_icm = None
+    collect_te = None
     model.eval()
     with torch.no_grad():
         for batch in loader:
@@ -30,13 +39,20 @@ def collect_predictions(model, loader, device):
                 logits_quality = outputs["logits_quality"]
                 logits_stage = outputs.get("logits_stage")
                 logits_morph = outputs.get("logits_morph")
+                logits_exp = outputs.get("logits_exp")
+                logits_icm = outputs.get("logits_icm")
+                logits_te = outputs.get("logits_te")
             else:
                 logits_quality = outputs
                 logits_stage = None
                 logits_morph = None
-            probs = torch.sigmoid(logits_quality)
-            probs_list.append(probs.cpu())
-            targets_list.append(batch["label"].cpu())
+                logits_exp = None
+                logits_icm = None
+                logits_te = None
+            if logits_quality is not None:
+                probs = torch.sigmoid(logits_quality)
+                probs_list.append(probs.cpu())
+                targets_list.append(batch["label"].cpu())
             image_paths.extend(batch["image_path"])
 
             batch_size = probs.shape[0]
@@ -60,13 +76,63 @@ def collect_predictions(model, loader, device):
                 if "morph" in batch:
                     morph_targets.extend(batch["morph"].cpu().tolist())
 
+            if collect_exp is None:
+                collect_exp = logits_exp is not None
+            if collect_exp:
+                if logits_exp is not None:
+                    exp_preds.extend(torch.argmax(logits_exp, dim=1).cpu().tolist())
+                else:
+                    exp_preds.extend([-1] * batch_size)
+                if "exp" in batch:
+                    exp_targets.extend(batch["exp"].cpu().tolist())
+
+            if collect_icm is None:
+                collect_icm = logits_icm is not None
+            if collect_icm:
+                if logits_icm is not None:
+                    icm_preds.extend(torch.argmax(logits_icm, dim=1).cpu().tolist())
+                else:
+                    icm_preds.extend([-1] * batch_size)
+                if "icm" in batch:
+                    icm_targets.extend(batch["icm"].cpu().tolist())
+
+            if collect_te is None:
+                collect_te = logits_te is not None
+            if collect_te:
+                if logits_te is not None:
+                    te_preds.extend(torch.argmax(logits_te, dim=1).cpu().tolist())
+                else:
+                    te_preds.extend([-1] * batch_size)
+                if "te" in batch:
+                    te_targets.extend(batch["te"].cpu().tolist())
+
     probs = torch.cat(probs_list) if probs_list else torch.empty(0)
     targets = torch.cat(targets_list).float() if targets_list else torch.empty(0)
     stage_out = stage_preds if collect_stage else None
     morph_out = morph_preds if collect_morph else None
+    exp_out = exp_preds if collect_exp else None
+    icm_out = icm_preds if collect_icm else None
+    te_out = te_preds if collect_te else None
     stage_true = stage_targets if collect_stage and stage_targets else None
     morph_true = morph_targets if collect_morph and morph_targets else None
-    return probs, targets, image_paths, stage_out, morph_out, stage_true, morph_true
+    exp_true = exp_targets if collect_exp and exp_targets else None
+    icm_true = icm_targets if collect_icm and icm_targets else None
+    te_true = te_targets if collect_te and te_targets else None
+    return (
+        probs,
+        targets,
+        image_paths,
+        stage_out,
+        morph_out,
+        exp_out,
+        icm_out,
+        te_out,
+        stage_true,
+        morph_true,
+        exp_true,
+        icm_true,
+        te_true,
+    )
 
 
 def compute_metrics_at_threshold(probs, targets, threshold):
@@ -103,9 +169,17 @@ def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5):
     model = LitClassifier.load_from_checkpoint(ckpt_path, cfg=cfg, pos_weight=dm.pos_weight)
     model.to(device)
 
-    val_probs, val_targets, _, _, _, _, _ = collect_predictions(model, dm.val_dataloader(), device)
-    if threshold_source == "scan":
+    val_probs, val_targets, _, _, _, _, _, _, _, _, _, _, _ = collect_predictions(
+        model, dm.val_dataloader(), device
+    )
+    if val_probs.numel() == 0 or val_targets.numel() == 0:
+        best_t = float(fixed_threshold)
+        best_f1 = 0.0
+        val_metrics = {}
+    elif threshold_source == "scan":
         best_t, best_f1 = find_best_threshold(val_probs, val_targets)
+        val_metrics = compute_metrics_at_threshold(val_probs, val_targets, best_t)
+        val_metrics["f1"] = best_f1
     else:
         best_t = float(fixed_threshold)
         if threshold_source == "ckpt":
@@ -113,14 +187,29 @@ def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5):
             if ckpt_threshold is not None:
                 best_t = float(ckpt_threshold)
         best_f1 = f1_score_at_threshold(val_probs, val_targets, best_t)
+        val_metrics = compute_metrics_at_threshold(val_probs, val_targets, best_t)
+        val_metrics["f1"] = best_f1
 
-    val_metrics = compute_metrics_at_threshold(val_probs, val_targets, best_t)
-    val_metrics["f1"] = best_f1
-
-    test_probs, test_targets, test_paths, stage_preds, morph_preds, stage_true, morph_true = collect_predictions(
+    (
+        test_probs,
+        test_targets,
+        test_paths,
+        stage_preds,
+        morph_preds,
+        exp_preds,
+        icm_preds,
+        te_preds,
+        stage_true,
+        morph_true,
+        exp_true,
+        icm_true,
+        te_true,
+    ) = collect_predictions(
         model, dm.test_dataloader(), device
     )
-    test_metrics = compute_metrics_at_threshold(test_probs, test_targets, best_t)
+    test_metrics = {}
+    if test_probs.numel() > 0 and test_targets.numel() > 0:
+        test_metrics = compute_metrics_at_threshold(test_probs, test_targets, best_t)
 
     preds = (test_probs >= best_t).int().tolist()
     pred_data = {
@@ -133,6 +222,12 @@ def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5):
         pred_data["stage_pred"] = stage_preds
     if morph_preds is not None:
         pred_data["morph_pred"] = morph_preds
+    if exp_preds is not None:
+        pred_data["exp_pred"] = exp_preds
+    if icm_preds is not None:
+        pred_data["icm_pred"] = icm_preds
+    if te_preds is not None:
+        pred_data["te_pred"] = te_preds
     pred_df = pd.DataFrame(pred_data)
 
     if stage_preds is not None and stage_true is not None:
@@ -148,6 +243,27 @@ def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5):
         valid = morph_true_t != -1
         if valid.any():
             test_metrics["morph_acc"] = float((morph_pred_t[valid] == morph_true_t[valid]).float().mean().item())
+
+    if exp_preds is not None and exp_true is not None:
+        exp_true_t = torch.tensor(exp_true)
+        exp_pred_t = torch.tensor(exp_preds)
+        valid = exp_true_t != -1
+        if valid.any():
+            test_metrics["exp_acc"] = float((exp_pred_t[valid] == exp_true_t[valid]).float().mean().item())
+
+    if icm_preds is not None and icm_true is not None:
+        icm_true_t = torch.tensor(icm_true)
+        icm_pred_t = torch.tensor(icm_preds)
+        valid = icm_true_t != -1
+        if valid.any():
+            test_metrics["icm_acc"] = float((icm_pred_t[valid] == icm_true_t[valid]).float().mean().item())
+
+    if te_preds is not None and te_true is not None:
+        te_true_t = torch.tensor(te_true)
+        te_pred_t = torch.tensor(te_preds)
+        valid = te_true_t != -1
+        if valid.any():
+            test_metrics["te_acc"] = float((te_pred_t[valid] == te_true_t[valid]).float().mean().item())
 
     output_dir = Path(cfg.logging.output_dir)
     ensure_dir(output_dir)

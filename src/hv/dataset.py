@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import numpy as np
 import pandas as pd
 import torch
@@ -111,6 +112,159 @@ def normalize_labels(df):
     return df
 
 
+MISSING_TOKENS = {"", "0", "ND", "NA", "N/A"}
+GARDNER_RE = re.compile(r"^([1-6])([ABC])([ABC])$")
+
+
+def _normalize_token(value):
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return None
+    if isinstance(value, str):
+        token = value.strip().upper()
+        if token in MISSING_TOKENS:
+            return None
+        return token
+    if isinstance(value, (int, float)):
+        if float(value) == 0.0:
+            return None
+        return value
+    return value
+
+
+def _is_missing(value):
+    return _normalize_token(value) is None
+
+
+def _is_range_token(value):
+    token = _normalize_token(value)
+    return isinstance(token, str) and "-" in token
+
+
+def _parse_exp(value):
+    value = _normalize_token(value)
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = float(value)
+        except ValueError:
+            return None
+    exp = int(value)
+    if 1 <= exp <= 6:
+        return exp
+    return None
+
+
+def _parse_icm_te(value):
+    value = _normalize_token(value)
+    if value is None:
+        return None
+    if isinstance(value, str):
+        token = value.strip().upper()
+        if token in {"A", "B", "C"}:
+            return token
+        try:
+            value = float(token)
+        except ValueError:
+            return None
+    idx = int(value)
+    if 1 <= idx <= 3:
+        return ["A", "B", "C"][idx - 1]
+    return None
+
+
+def _parse_gardner(value):
+    value = _normalize_token(value)
+    if value is None or not isinstance(value, str):
+        return None
+    token = value.strip().upper()
+    if "-" in token:
+        return None
+    match = GARDNER_RE.match(token)
+    if not match:
+        return None
+    exp = int(match.group(1))
+    icm = match.group(2)
+    te = match.group(3)
+    return exp, icm, te
+
+
+def prepare_morphology_df(df):
+    exp_ids = []
+    icm_ids = []
+    te_ids = []
+    keep_indices = []
+
+    for idx, row in df.iterrows():
+        if _is_range_token(row.get("gardner")) or _is_range_token(row.get("grade")):
+            continue
+
+        exp = _parse_exp(row.get("exp"))
+        icm = _parse_icm_te(row.get("icm"))
+        te = _parse_icm_te(row.get("te"))
+
+        if exp is None or icm is None or te is None:
+            gardner_val = row.get("gardner")
+            if _is_missing(gardner_val):
+                gardner_val = row.get("grade")
+            parsed = _parse_gardner(gardner_val)
+            if parsed:
+                parsed_exp, parsed_icm, parsed_te = parsed
+                if exp is None:
+                    exp = parsed_exp
+                if icm is None:
+                    icm = parsed_icm
+                if te is None:
+                    te = parsed_te
+
+        if exp is None:
+            continue
+        if exp < 3:
+            exp_ids.append(exp - 1)
+            icm_ids.append(-1)
+            te_ids.append(-1)
+            keep_indices.append(idx)
+            continue
+        if icm is None or te is None:
+            continue
+
+        exp_ids.append(exp - 1)
+        icm_ids.append({"A": 0, "B": 1, "C": 2}[icm])
+        te_ids.append({"A": 0, "B": 1, "C": 2}[te])
+        keep_indices.append(idx)
+
+    if not keep_indices:
+        return df.iloc[0:0].copy()
+
+    out = df.loc[keep_indices].copy().reset_index(drop=True)
+    out["exp"] = exp_ids
+    out["icm"] = icm_ids
+    out["te"] = te_ids
+    return out
+
+
+def prepare_stage_df(df):
+    mapping = {"cleavage": 0, "morula": 1, "blastocyst": 2}
+    stage_ids = []
+    keep_indices = []
+    for idx, value in df["stage"].items():
+        token = _normalize_token(value)
+        if token is None:
+            continue
+        key = token.strip().lower()
+        if key not in mapping:
+            continue
+        stage_ids.append(mapping[key])
+        keep_indices.append(idx)
+
+    if not keep_indices:
+        return df.iloc[0:0].copy()
+
+    out = df.loc[keep_indices].copy().reset_index(drop=True)
+    out["stage"] = stage_ids
+    return out
+
+
 def compute_pos_weight(df):
     pos = int((df["label"] == 1).sum())
     neg = int((df["label"] == 0).sum())
@@ -129,6 +283,12 @@ def collate_fn(batch):
         output["stage"] = torch.stack([b["stage"] for b in batch])
     if "morph" in batch[0]:
         output["morph"] = torch.stack([b["morph"] for b in batch])
+    if "exp" in batch[0]:
+        output["exp"] = torch.stack([b["exp"] for b in batch])
+    if "icm" in batch[0]:
+        output["icm"] = torch.stack([b["icm"] for b in batch])
+    if "te" in batch[0]:
+        output["te"] = torch.stack([b["te"] for b in batch])
     return output
 
 
@@ -139,6 +299,9 @@ class HVEmbryoDataset(Dataset):
         self.transform = transform
         self.has_stage = "stage" in self.df.columns
         self.has_morph = "morph" in self.df.columns
+        self.has_exp = "exp" in self.df.columns
+        self.has_icm = "icm" in self.df.columns
+        self.has_te = "te" in self.df.columns
 
     def __len__(self):
         return len(self.df)
@@ -151,7 +314,11 @@ class HVEmbryoDataset(Dataset):
             img = img.convert("RGB")
         if self.transform is not None:
             img = self.transform(img)
-        label = torch.tensor(float(row["label"]), dtype=torch.float32)
+        if "label" in row.index:
+            label_value = float(row["label"])
+        else:
+            label_value = -1.0
+        label = torch.tensor(label_value, dtype=torch.float32)
         if "day" in row.index:
             day_value = int(row["day"])
         else:
@@ -173,6 +340,21 @@ class HVEmbryoDataset(Dataset):
             if pd.isna(morph_val):
                 morph_val = -1
             sample["morph"] = torch.tensor(int(morph_val), dtype=torch.long)
+        if self.has_exp:
+            exp_val = row.get("exp")
+            if pd.isna(exp_val):
+                exp_val = -1
+            sample["exp"] = torch.tensor(int(exp_val), dtype=torch.long)
+        if self.has_icm:
+            icm_val = row.get("icm")
+            if pd.isna(icm_val):
+                icm_val = -1
+            sample["icm"] = torch.tensor(int(icm_val), dtype=torch.long)
+        if self.has_te:
+            te_val = row.get("te")
+            if pd.isna(te_val):
+                te_val = -1
+            sample["te"] = torch.tensor(int(te_val), dtype=torch.long)
         return sample
 
 
@@ -194,7 +376,16 @@ class HVDataModule(pl.LightningDataModule):
 
     def setup(self, stage=None):
         df = pd.read_csv(self.csv_path)
-        df = normalize_labels(df)
+        task = str(getattr(self.cfg.data, "task", "quality")).lower()
+        if task in {"quality", "all"}:
+            df = normalize_labels(df)
+
+        if task == "morphology":
+            df = prepare_morphology_df(df)
+        elif task == "stage":
+            if "stage" not in df.columns:
+                raise KeyError("Missing 'stage' column for stage task.")
+            df = prepare_stage_df(df)
 
         if self.eval_external:
             self.test_df = df.reset_index(drop=True)
@@ -222,9 +413,15 @@ class HVDataModule(pl.LightningDataModule):
             )
 
         if self.eval_external:
-            self.pos_weight = compute_pos_weight(self.test_df)
+            if "label" in self.test_df.columns:
+                self.pos_weight = compute_pos_weight(self.test_df)
+            else:
+                self.pos_weight = 1.0
         else:
-            self.pos_weight = compute_pos_weight(self.train_df)
+            if "label" in self.train_df.columns:
+                self.pos_weight = compute_pos_weight(self.train_df)
+            else:
+                self.pos_weight = 1.0
 
         train_transform = build_transforms(
             self.cfg,
@@ -244,14 +441,17 @@ class HVDataModule(pl.LightningDataModule):
 
     def _log_dataset_summary(self):
         if self.eval_external:
-            counts = self.test_df["label"].value_counts().to_dict()
-            good = int(counts.get(1, 0))
-            poor = int(counts.get(0, 0))
             print(f"[data] external size: {len(self.test_df)}")
-            print(f"[data] external good/poor: {good}/{poor}")
+            if "label" in self.test_df.columns:
+                counts = self.test_df["label"].value_counts().to_dict()
+                good = int(counts.get(1, 0))
+                poor = int(counts.get(0, 0))
+                print(f"[data] external good/poor: {good}/{poor}")
             return
 
         def _counts(frame):
+            if "label" not in frame.columns:
+                return None, None
             counts = frame["label"].value_counts().to_dict()
             good = int(counts.get(1, 0))
             poor = int(counts.get(0, 0))
@@ -264,11 +464,12 @@ class HVDataModule(pl.LightningDataModule):
             "[data] train/val/test sizes: "
             f"{len(self.train_df)}/{len(self.val_df)}/{len(self.test_df)}"
         )
-        print(
-            "[data] train good/poor: "
-            f"{train_good}/{train_poor} | val good/poor: {val_good}/{val_poor} | "
-            f"test good/poor: {test_good}/{test_poor}"
-        )
+        if train_good is not None:
+            print(
+                "[data] train good/poor: "
+                f"{train_good}/{train_poor} | val good/poor: {val_good}/{val_poor} | "
+                f"test good/poor: {test_good}/{test_poor}"
+            )
 
     def train_dataloader(self):
         return DataLoader(
