@@ -320,7 +320,11 @@ class HVEmbryoDataset(Dataset):
             label_value = -1.0
         label = torch.tensor(label_value, dtype=torch.float32)
         if "day" in row.index:
-            day_value = int(row["day"])
+            day_raw = row["day"]
+            if pd.isna(day_raw):
+                day_value = -1
+            else:
+                day_value = int(day_raw)
         else:
             day_value = -1
         day = torch.tensor(day_value, dtype=torch.long)
