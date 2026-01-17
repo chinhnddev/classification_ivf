@@ -1,5 +1,6 @@
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -149,6 +150,27 @@ def load_threshold_from_ckpt(ckpt_path):
     return ckpt.get("best_threshold")
 
 
+def _parse_day_value(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return -1
+    if isinstance(value, (int, float)):
+        return int(value)
+    match = re.search(r"(\\d+)", str(value))
+    if match:
+        return int(match.group(1))
+    return -1
+
+
+def load_external_df(csv_path, day_value):
+    df = pd.read_csv(csv_path)
+    if day_value is None:
+        return df
+    if "day" not in df.columns:
+        raise KeyError("Missing 'day' column in external CSV for --day filter.")
+    day_series = df["day"].apply(_parse_day_value)
+    return df[day_series == int(day_value)].reset_index(drop=True)
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -157,14 +179,23 @@ def parse_args():
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--threshold_source", choices=["ckpt", "fixed"], default="ckpt")
     parser.add_argument("--fixed_threshold", type=float, default=0.5)
+    parser.add_argument("--day", type=int, default=None, help="Filter external CSV by day value.")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     cfg = load_config(args.config)
-    cfg.data.csv_path = args.external_csv
     cfg.data.eval_external = True
+    output_dir = Path(args.output_dir)
+    ensure_dir(output_dir)
+
+    df = load_external_df(args.external_csv, args.day)
+    if len(df) == 0:
+        raise ValueError(f"No samples found for day={args.day} in {args.external_csv}")
+    filtered_csv = output_dir / "external_filtered.csv"
+    df.to_csv(filtered_csv, index=False)
+    cfg.data.csv_path = str(filtered_csv)
 
     set_seed(cfg.seed)
 
@@ -196,9 +227,6 @@ def main():
     metrics["threshold_used"] = float(threshold)
     metrics["n_pos"] = n_pos
     metrics["n_neg"] = n_neg
-
-    output_dir = Path(args.output_dir)
-    ensure_dir(output_dir)
 
     pred_data = {
         "image_path": image_paths,
