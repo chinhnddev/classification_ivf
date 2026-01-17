@@ -15,18 +15,50 @@ def collect_predictions(model, loader, device):
     probs_list = []
     targets_list = []
     image_paths = []
+    stage_preds = []
+    morph_preds = []
+    collect_stage = None
+    collect_morph = None
     model.eval()
     with torch.no_grad():
         for batch in loader:
             images = batch["image"].to(device)
-            logits = model(images)
-            probs = torch.sigmoid(logits)
+            outputs = model(images)
+            if isinstance(outputs, dict):
+                logits_quality = outputs["logits_quality"]
+                logits_stage = outputs.get("logits_stage")
+                logits_morph = outputs.get("logits_morph")
+            else:
+                logits_quality = outputs
+                logits_stage = None
+                logits_morph = None
+            probs = torch.sigmoid(logits_quality)
             probs_list.append(probs.cpu())
             targets_list.append(batch["label"].cpu())
             image_paths.extend(batch["image_path"])
+
+            batch_size = probs.shape[0]
+            if collect_stage is None:
+                collect_stage = logits_stage is not None
+            if collect_stage:
+                if logits_stage is not None:
+                    stage_preds.extend(torch.argmax(logits_stage, dim=1).cpu().tolist())
+                else:
+                    stage_preds.extend([-1] * batch_size)
+
+            if collect_morph is None:
+                collect_morph = logits_morph is not None
+            if collect_morph:
+                if logits_morph is not None:
+                    morph_preds.extend(torch.argmax(logits_morph, dim=1).cpu().tolist())
+                else:
+                    morph_preds.extend([-1] * batch_size)
+
     probs = torch.cat(probs_list) if probs_list else torch.empty(0)
     targets = torch.cat(targets_list).float() if targets_list else torch.empty(0)
-    return probs, targets, image_paths
+    stage_out = stage_preds if collect_stage else None
+    morph_out = morph_preds if collect_morph else None
+    return probs, targets, image_paths, stage_out, morph_out
 
 
 def compute_metrics_at_threshold(probs, targets, threshold):
@@ -63,7 +95,7 @@ def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5):
     model = LitClassifier.load_from_checkpoint(ckpt_path, cfg=cfg, pos_weight=dm.pos_weight)
     model.to(device)
 
-    val_probs, val_targets, _ = collect_predictions(model, dm.val_dataloader(), device)
+    val_probs, val_targets, _, _, _ = collect_predictions(model, dm.val_dataloader(), device)
     if threshold_source == "scan":
         best_t, best_f1 = find_best_threshold(val_probs, val_targets)
     else:
@@ -77,18 +109,23 @@ def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5):
     val_metrics = compute_metrics_at_threshold(val_probs, val_targets, best_t)
     val_metrics["f1"] = best_f1
 
-    test_probs, test_targets, test_paths = collect_predictions(model, dm.test_dataloader(), device)
+    test_probs, test_targets, test_paths, stage_preds, morph_preds = collect_predictions(
+        model, dm.test_dataloader(), device
+    )
     test_metrics = compute_metrics_at_threshold(test_probs, test_targets, best_t)
 
     preds = (test_probs >= best_t).int().tolist()
-    pred_df = pd.DataFrame(
-        {
-            "image_path": test_paths,
-            "y_true": test_targets.int().tolist(),
-            "y_prob": test_probs.tolist(),
-            "y_pred": preds,
-        }
-    )
+    pred_data = {
+        "image_path": test_paths,
+        "y_true": test_targets.int().tolist(),
+        "y_prob": test_probs.tolist(),
+        "y_pred": preds,
+    }
+    if stage_preds is not None:
+        pred_data["stage_pred"] = stage_preds
+    if morph_preds is not None:
+        pred_data["morph_pred"] = morph_preds
+    pred_df = pd.DataFrame(pred_data)
 
     output_dir = Path(cfg.logging.output_dir)
     ensure_dir(output_dir)

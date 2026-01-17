@@ -22,12 +22,17 @@ data:
   normalize_std:  [0.229, 0.224, 0.225]
 
 model:
-  name: ivf_convnext_lite
+  name: ivf_multitask_head
+  backbone: ivf_convnext_lite
   dropout: 0.2
+  enable_stage: true
+  enable_morph: true
+  num_stage_classes: 3
+  num_morph_classes: 4
   stem_stride: 2
-  dims: [80, 160, 320, 640]
-  depths: [2, 2, 4, 2]
-  drop_path_rate: 0.1
+  dims: [64, 128, 256, 512]
+  depths: [2, 2, 6, 2]
+  drop_path_rate: 0.15
   mlp_ratio: 4
   layer_scale_init: 1.0e-6
 
@@ -35,6 +40,11 @@ training:
   epochs: 40
   lr: 0.0003
   weight_decay: 0.0005
+
+  loss_weights:
+    quality: 1.0
+    stage: 0.3
+    morph: 0.3
 
   early_stopping:
     monitor: val_auprc
@@ -46,4 +56,4 @@ training:
   deterministic: true
 
 logging:
-  output_dir: outputs_ivf_convnext_lite_tuned
+  output_dir: outputs_multitask_with_aux

@@ -124,7 +124,12 @@ def collate_fn(batch):
     labels = torch.stack([b["label"] for b in batch])
     image_paths = [b["image_path"] for b in batch]
     days = torch.stack([b["day"] for b in batch])
-    return {"image": images, "label": labels, "image_path": image_paths, "day": days}
+    output = {"image": images, "label": labels, "image_path": image_paths, "day": days}
+    if "stage" in batch[0]:
+        output["stage"] = torch.stack([b["stage"] for b in batch])
+    if "morph" in batch[0]:
+        output["morph"] = torch.stack([b["morph"] for b in batch])
+    return output
 
 
 class HVEmbryoDataset(Dataset):
@@ -132,6 +137,8 @@ class HVEmbryoDataset(Dataset):
         self.df = df.reset_index(drop=True)
         self.data_root = Path(data_root)
         self.transform = transform
+        self.has_stage = "stage" in self.df.columns
+        self.has_morph = "morph" in self.df.columns
 
     def __len__(self):
         return len(self.df)
@@ -150,12 +157,23 @@ class HVEmbryoDataset(Dataset):
         else:
             day_value = -1
         day = torch.tensor(day_value, dtype=torch.long)
-        return {
+        sample = {
             "image": img,
             "label": label,
             "image_path": str(row["image_path"]),
             "day": day,
         }
+        if self.has_stage:
+            stage_val = row.get("stage")
+            if pd.isna(stage_val):
+                stage_val = -1
+            sample["stage"] = torch.tensor(int(stage_val), dtype=torch.long)
+        if self.has_morph:
+            morph_val = row.get("morph")
+            if pd.isna(morph_val):
+                morph_val = -1
+            sample["morph"] = torch.tensor(int(morph_val), dtype=torch.long)
+        return sample
 
 
 class HVDataModule(pl.LightningDataModule):

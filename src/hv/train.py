@@ -13,6 +13,14 @@ from hv.metrics import find_best_threshold
 from hv.utils import set_seed, load_config, ensure_dir, save_config
 
 
+def _cfg_get(cfg, key: str, default=None):
+    if cfg is None:
+        return default
+    if isinstance(cfg, dict):
+        return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+
 class LitClassifier(pl.LightningModule):
     def __init__(self, cfg, pos_weight=1.0):
         super().__init__()
@@ -28,14 +36,45 @@ class LitClassifier(pl.LightningModule):
         self.val_probs = []
         self.val_targets = []
         self.best_threshold = 0.5
+        model_cfg = _cfg_get(cfg, "model", cfg)
+        self.enable_stage = bool(_cfg_get(model_cfg, "enable_stage", False))
+        self.enable_morph = bool(_cfg_get(model_cfg, "enable_morph", False))
+        weights_cfg = _cfg_get(_cfg_get(cfg, "training", cfg), "loss_weights", None)
+        self.loss_w_quality = float(_cfg_get(weights_cfg, "quality", 1.0))
+        self.loss_w_stage = float(_cfg_get(weights_cfg, "stage", 0.3))
+        self.loss_w_morph = float(_cfg_get(weights_cfg, "morph", 0.3))
+        self.loss_stage_fn = nn.CrossEntropyLoss(ignore_index=-1)
+        self.loss_morph_fn = nn.CrossEntropyLoss(ignore_index=-1)
+        self.stage_correct = 0
+        self.stage_total = 0
+        self.morph_correct = 0
+        self.morph_total = 0
 
     def forward(self, x):
         return self.model(x)
 
+    def _unpack_outputs(self, outputs):
+        if isinstance(outputs, dict):
+            return outputs
+        return {"logits_quality": outputs, "logits_stage": None, "logits_morph": None}
+
     def training_step(self, batch, batch_idx):
-        logits = self(batch["image"])
+        outputs = self(batch["image"])
+        outputs = self._unpack_outputs(outputs)
+        logits = outputs["logits_quality"]
         targets = batch["label"].float()
-        loss = self.loss_fn(logits, targets)
+        loss_quality = self.loss_fn(logits, targets)
+        loss = self.loss_w_quality * loss_quality
+        if self.enable_stage and outputs["logits_stage"] is not None and "stage" in batch:
+            stage_targets = batch["stage"].long()
+            if (stage_targets != -1).any():
+                loss_stage = self.loss_stage_fn(outputs["logits_stage"], stage_targets)
+                loss = loss + self.loss_w_stage * loss_stage
+        if self.enable_morph and outputs["logits_morph"] is not None and "morph" in batch:
+            morph_targets = batch["morph"].long()
+            if (morph_targets != -1).any():
+                loss_morph = self.loss_morph_fn(outputs["logits_morph"], morph_targets)
+                loss = loss + self.loss_w_morph * loss_morph
         probs = torch.sigmoid(logits)
         self.train_acc.update(probs, targets.int())
         batch_size = targets.shape[0]
@@ -54,9 +93,30 @@ class LitClassifier(pl.LightningModule):
         self.train_acc.reset()
 
     def validation_step(self, batch, batch_idx):
-        logits = self(batch["image"])
+        outputs = self(batch["image"])
+        outputs = self._unpack_outputs(outputs)
+        logits = outputs["logits_quality"]
         targets = batch["label"].float()
-        loss = self.loss_fn(logits, targets)
+        loss_quality = self.loss_fn(logits, targets)
+        loss = self.loss_w_quality * loss_quality
+        if self.enable_stage and outputs["logits_stage"] is not None and "stage" in batch:
+            stage_targets = batch["stage"].long()
+            if (stage_targets != -1).any():
+                loss_stage = self.loss_stage_fn(outputs["logits_stage"], stage_targets)
+                loss = loss + self.loss_w_stage * loss_stage
+                stage_preds = torch.argmax(outputs["logits_stage"], dim=1)
+                valid = stage_targets != -1
+                self.stage_correct += int((stage_preds[valid] == stage_targets[valid]).sum().item())
+                self.stage_total += int(valid.sum().item())
+        if self.enable_morph and outputs["logits_morph"] is not None and "morph" in batch:
+            morph_targets = batch["morph"].long()
+            if (morph_targets != -1).any():
+                loss_morph = self.loss_morph_fn(outputs["logits_morph"], morph_targets)
+                loss = loss + self.loss_w_morph * loss_morph
+                morph_preds = torch.argmax(outputs["logits_morph"], dim=1)
+                valid = morph_targets != -1
+                self.morph_correct += int((morph_preds[valid] == morph_targets[valid]).sum().item())
+                self.morph_total += int(valid.sum().item())
         probs = torch.sigmoid(logits)
         self.val_acc.update(probs, targets.int())
         self.val_auroc.update(probs, targets.int())
@@ -84,12 +144,20 @@ class LitClassifier(pl.LightningModule):
         self.log("val_auprc", val_auprc, prog_bar=True)
         self.log("val_f1", torch.tensor(best_f1, device=self.device), prog_bar=True)
         self.log("val_best_threshold", torch.tensor(best_t, device=self.device))
+        if self.stage_total > 0:
+            self.log("val_stage_acc", self.stage_correct / self.stage_total, prog_bar=False)
+        if self.morph_total > 0:
+            self.log("val_morph_acc", self.morph_correct / self.morph_total, prog_bar=False)
 
         self.val_acc.reset()
         self.val_auroc.reset()
         self.val_auprc.reset()
         self.val_probs = []
         self.val_targets = []
+        self.stage_correct = 0
+        self.stage_total = 0
+        self.morph_correct = 0
+        self.morph_total = 0
 
     def on_save_checkpoint(self, checkpoint):
         checkpoint["best_threshold"] = float(self.best_threshold)
