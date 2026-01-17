@@ -82,6 +82,21 @@ class LitClassifier(pl.LightningModule):
         if self.task == "stage" and self.freeze_encoder_ratio > 0:
             self._set_encoder_freeze_ratio(self.freeze_encoder_ratio)
 
+        model_cfg = _cfg_get(self.cfg, "model", self.cfg)
+        if bool(_cfg_get(model_cfg, "freeze_stage_head", False)):
+            self._freeze_if_exists(["stage_head"])
+        if bool(_cfg_get(model_cfg, "freeze_morph_head", False)):
+            self._freeze_if_exists(["morph_head", "exp_head", "icm_head", "te_head"])
+        if bool(_cfg_get(model_cfg, "freeze_encoder", False)):
+            self._freeze_if_exists(["encoder"])
+
+        if bool(_cfg_get(model_cfg, "freeze_stage_head", False)):
+            print("[freeze] stage head frozen")
+        if bool(_cfg_get(model_cfg, "freeze_morph_head", False)):
+            print("[freeze] morph heads frozen")
+        if bool(_cfg_get(model_cfg, "freeze_encoder", False)):
+            print("[freeze] encoder frozen")
+
     def _freeze_if_exists(self, names):
         for name in names:
             module = getattr(self.model, name, None)
@@ -370,7 +385,28 @@ def run_training(cfg, overfit_n=0):
     init_ckpt = _cfg_get(_cfg_get(cfg, "training", cfg), "init_ckpt", None)
     if init_ckpt:
         state = torch.load(init_ckpt, map_location="cpu")
-        model.load_state_dict(state.get("state_dict", state), strict=False)
+        state_dict = state.get("state_dict", state)
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if missing:
+            print(f"[init] missing keys: {len(missing)}")
+            for key in missing[:10]:
+                print(f"[init]   missing: {key}")
+        if unexpected:
+            print(f"[init] unexpected keys: {len(unexpected)}")
+            for key in unexpected[:10]:
+                print(f"[init]   unexpected: {key}")
+        print("[init] loaded checkpoint weights (strict=False)")
+
+    trainable = 0
+    frozen = 0
+    for param in model.parameters():
+        if param.requires_grad:
+            trainable += param.numel()
+        else:
+            frozen += param.numel()
+    total = trainable + frozen
+    if total > 0:
+        print(f"[freeze] trainable params: {trainable} | frozen params: {frozen}")
     trainer.fit(model, dm)
 
     return output_dir, ckpt_cb.best_model_path
