@@ -44,7 +44,7 @@ model:
   num_icm_classes: 3
   num_te_classes: 3
 
-  freeze_encoder: true
+  freeze_encoder: false
   freeze_morph_head: true
   freeze_stage_head: true
 
