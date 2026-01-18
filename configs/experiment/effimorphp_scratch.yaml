@@ -1,0 +1,59 @@
+seed: 0
+
+data:
+  csv_path: data/metadata/kaggle_blastocyst_good_poor.csv
+  data_root: data
+  train_frac: 0.64
+  val_frac: 0.16
+  test_frac: 0.2
+
+  batch_size: 32
+  num_workers: 4
+
+  resize_size: 256
+  crop_size: 224
+
+  rotation_deg: 5
+  color_jitter: 0.0
+  horizontal_flip: 0.5
+
+  normalize_mean: [0.485, 0.456, 0.406]
+  normalize_std:  [0.229, 0.224, 0.225]
+
+model:
+  name: ivf_effimorphp
+  pretrained: false
+  dropout: 0.3
+
+  use_simam: true
+  use_msma: true
+  use_mcm: true
+  mcm_depth: 1
+  mcm_expand: 2
+  use_eca: true
+  pooling: gem
+  gem_p: 3.0
+
+training:
+  epochs: 40
+  lr: 0.0003
+  weight_decay: 0.0005
+
+  early_stopping:
+    monitor: val_auprc
+    patience: 10
+
+  precision: 32
+  accelerator: auto
+  devices: 1
+  deterministic: true
+
+logging:
+  output_dir: outputs_effimorphp_scratch
+
+distill:
+  enabled: false
+  teacher_model: resnet50_baseline
+  teacher_ckpt: ""
+  temperature: 2.0
+  lambda_kd: 0.2
