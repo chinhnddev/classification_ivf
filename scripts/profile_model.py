@@ -20,7 +20,7 @@ def profile_model(cfg_path, input_sizes):
     model.eval()
     for size in input_sizes:
         inputs = torch.zeros(1, 3, size, size)
-        with FlopCounterMode(model, display=False) as fc:
+        with FlopCounterMode(display=False) as fc:
             _ = model(inputs)
         flops = fc.get_total_flops()
         params = sum(p.numel() for p in model.parameters())
