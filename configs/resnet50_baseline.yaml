@@ -24,7 +24,7 @@ data:
 model:
   name: resnet50_baseline
   dropout: 0.2
-  pretrained: false
+  pretrained: true
 
 training:
   epochs: 40
@@ -41,4 +41,4 @@ training:
   deterministic: true
 
 logging:
-  output_dir: outputs_resnet50_baseline
+  output_dir: outputs_resnet50_baseline_pretrained
