@@ -2,7 +2,7 @@ seed: 0
 
 data:
   csv_path: data/metadata/kaggle_blastocyst_good_poor.csv
-  data_root: data
+  data_root: data/hv_hospital_day3_day5
   train_frac: 0.64
   val_frac: 0.16
   test_frac: 0.2
