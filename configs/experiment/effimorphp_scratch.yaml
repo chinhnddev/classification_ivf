@@ -8,7 +8,7 @@ data:
   test_frac: 0.2
 
   batch_size: 32
-  num_workers: 4
+  num_workers: 2
 
   resize_size: 256
   crop_size: 224
@@ -43,7 +43,7 @@ training:
     monitor: val_auprc
     patience: 10
 
-  precision: 32
+  precision: 16
   accelerator: auto
   devices: 1
   deterministic: true
