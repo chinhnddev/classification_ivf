@@ -170,3 +170,59 @@ class IVF_EffiMorphPP(nn.Module):
         if return_features:
             return logits, feats
         return logits
+
+
+class EffiMorphPPEncoder(nn.Module):
+    def __init__(
+        self,
+        pretrained: bool = True,
+        use_simam: bool = True,
+        use_msma: bool = True,
+        use_mcm: bool = True,
+        mcm_depth: int = 1,
+        mcm_expand: int = 2,
+        use_eca: bool = True,
+        eca_kernel: int | None = None,
+        reduce_channels: int | None = 640,
+    ):
+        super().__init__()
+        if EfficientNet_B0_Weights is not None:
+            weights = EfficientNet_B0_Weights.DEFAULT if pretrained else None
+            backbone = efficientnet_b0(weights=weights)
+        else:
+            backbone = efficientnet_b0(pretrained=pretrained)
+
+        self.trunk = backbone.features
+        channels = backbone.classifier[-1].in_features
+        if reduce_channels is not None and reduce_channels > 0 and reduce_channels != channels:
+            self.bottleneck = nn.Sequential(
+                nn.Conv2d(channels, reduce_channels, kernel_size=1, bias=False),
+                nn.BatchNorm2d(reduce_channels),
+                nn.SiLU(),
+            )
+            channels = reduce_channels
+        else:
+            self.bottleneck = nn.Identity()
+
+        self.simam = SimAM() if use_simam else nn.Identity()
+        self.msma = MSMABlock(channels) if use_msma else nn.Identity()
+        if use_mcm and mcm_depth > 0:
+            self.mcm = nn.Sequential(*[MCMBlock(channels, expand=mcm_expand) for _ in range(mcm_depth)])
+        else:
+            self.mcm = nn.Identity()
+        self.eca = ECA(channels, kernel_size=eca_kernel) if use_eca else nn.Identity()
+
+        self.feature_dim = channels
+        self.returns_feature_map = True
+
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.trunk(x)
+        x = self.bottleneck(x)
+        x = self.simam(x)
+        x = self.msma(x)
+        x = self.mcm(x)
+        x = self.eca(x)
+        return x
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_features(x)

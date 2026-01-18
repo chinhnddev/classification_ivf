@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import resnet50, efficientnet_b0, mobilenet_v3_large
 
-from ivf.models.ivf_effimorphp import IVF_EffiMorphPP
+from ivf.models.ivf_effimorphp import IVF_EffiMorphPP, EffiMorphPPEncoder, GeM
 
 try:
     from torchvision.models import ResNet50_Weights, EfficientNet_B0_Weights, MobileNet_V3_Large_Weights
@@ -357,10 +357,21 @@ class IVFMorphStageHead(nn.Module):
         num_exp_classes: int,
         num_icm_classes: int,
         num_te_classes: int,
+        pool_quality: str = "gap",
+        pool_aux: str = "gap",
     ):
         super().__init__()
         self.encoder = encoder
-        self.dropout = nn.Dropout(p=dropout) if dropout and dropout > 0 else nn.Identity()
+        self.encoder_returns_map = bool(getattr(encoder, "returns_feature_map", False))
+        if self.encoder_returns_map:
+            self.pool_quality = self._build_pool(pool_quality, feat_dim)
+            self.pool_aux = self._build_pool(pool_aux, feat_dim)
+            self.quality_dropout = nn.Dropout(p=dropout) if dropout and dropout > 0 else nn.Identity()
+        else:
+            # Preserve previous behavior for vector encoders.
+            self.pool_quality = None
+            self.pool_aux = None
+            self.dropout = nn.Dropout(p=dropout) if dropout and dropout > 0 else nn.Identity()
         self.quality_head = nn.Linear(feat_dim, 1) if enable_quality else None
         self.stage_head = nn.Linear(feat_dim, num_stage_classes) if enable_stage else None
         if enable_morph:
@@ -372,14 +383,38 @@ class IVFMorphStageHead(nn.Module):
             self.icm_head = None
             self.te_head = None
 
+    def _build_pool(self, name: str, feat_dim: int) -> nn.Module:
+        name = name.lower()
+        if name == "gem":
+            return GeM()
+        if name == "gap":
+            return nn.AdaptiveAvgPool2d(1)
+        raise ValueError(f"Unknown pool type: {name}")
+
+    def _pool_features(self, pool: nn.Module, fmap: torch.Tensor) -> torch.Tensor:
+        if isinstance(pool, GeM):
+            return pool(fmap)
+        if isinstance(pool, nn.AdaptiveAvgPool2d):
+            return pool(fmap).flatten(1)
+        raise ValueError("Unsupported pooling module.")
+
     def forward(self, x: torch.Tensor) -> dict:
-        feats = self.encoder(x)
-        feats = self.dropout(feats)
-        logits_quality = self.quality_head(feats).squeeze(1) if self.quality_head is not None else None
-        logits_stage = self.stage_head(feats) if self.stage_head is not None else None
-        logits_exp = self.exp_head(feats) if self.exp_head is not None else None
-        logits_icm = self.icm_head(feats) if self.icm_head is not None else None
-        logits_te = self.te_head(feats) if self.te_head is not None else None
+        if self.encoder_returns_map:
+            fmap = self.encoder.forward_features(x) if hasattr(self.encoder, "forward_features") else self.encoder(x)
+            quality_feats = self._pool_features(self.pool_quality, fmap)
+            aux_feats = self._pool_features(self.pool_aux, fmap)
+            quality_feats = self.quality_dropout(quality_feats)
+        else:
+            feats = self.encoder(x)
+            feats = self.dropout(feats)
+            quality_feats = feats
+            aux_feats = feats
+
+        logits_quality = self.quality_head(quality_feats).squeeze(1) if self.quality_head is not None else None
+        logits_stage = self.stage_head(aux_feats) if self.stage_head is not None else None
+        logits_exp = self.exp_head(aux_feats) if self.exp_head is not None else None
+        logits_icm = self.icm_head(aux_feats) if self.icm_head is not None else None
+        logits_te = self.te_head(aux_feats) if self.te_head is not None else None
         return {
             "logits_quality": logits_quality,
             "logits_stage": logits_stage,
@@ -486,6 +521,7 @@ def build_model(cfg):
         - "ivf_morph_stage_head"
       cfg.model.dropout: head dropout
       cfg.model.pretrained: false
+      cfg.model.encoder_name: optional encoder override for morph-stage head
       cfg.model.stem_stride: 2 or 4
       cfg.model.dims: [64,128,256,512]
       cfg.model.depths: [2,2,6,2]
@@ -606,7 +642,9 @@ def build_model(cfg):
             num_morph_classes=num_morph_classes,
         )
     if name == "ivf_morph_stage_head":
-        backbone_name = str(_cfg_get(model_cfg, "backbone", "ivf_convnext_lite")).lower()
+        encoder_name = str(
+            _cfg_get(model_cfg, "encoder_name", _cfg_get(model_cfg, "backbone", "ivf_convnext_lite"))
+        ).lower()
         enable_quality = bool(_cfg_get(model_cfg, "enable_quality", True))
         enable_stage = bool(_cfg_get(model_cfg, "enable_stage", True))
         enable_morph = bool(_cfg_get(model_cfg, "enable_morph", True))
@@ -614,12 +652,33 @@ def build_model(cfg):
         num_exp_classes = int(_cfg_get(model_cfg, "num_exp_classes", 6))
         num_icm_classes = int(_cfg_get(model_cfg, "num_icm_classes", 3))
         num_te_classes = int(_cfg_get(model_cfg, "num_te_classes", 3))
+        pool_quality = str(_cfg_get(model_cfg, "pooling_quality", "gap"))
+        pool_aux = str(_cfg_get(model_cfg, "pooling_aux", "gap"))
         if enable_stage and num_stage_classes < 2:
             raise ValueError("enable_stage requires num_stage_classes >= 2")
         if enable_morph and (num_exp_classes < 2 or num_icm_classes < 2 or num_te_classes < 2):
             raise ValueError("enable_morph requires exp/icm/te classes >= 2")
 
-        if backbone_name in ("ivf_convnext_lite", "convnext_lite", "ivf_cnn_best"):
+        if encoder_name in ("effimorphp", "ivf_effimorphp"):
+            reduce_channels = _cfg_get(model_cfg, "reduce_channels", 640)
+            if reduce_channels is not None:
+                reduce_channels = int(reduce_channels)
+            eca_kernel = _cfg_get(model_cfg, "eca_kernel", None)
+            if eca_kernel is not None:
+                eca_kernel = int(eca_kernel)
+            encoder = EffiMorphPPEncoder(
+                pretrained=pretrained,
+                use_simam=bool(_cfg_get(model_cfg, "use_simam", True)),
+                use_msma=bool(_cfg_get(model_cfg, "use_msma", True)),
+                use_mcm=bool(_cfg_get(model_cfg, "use_mcm", True)),
+                mcm_depth=int(_cfg_get(model_cfg, "mcm_depth", 1)),
+                mcm_expand=int(_cfg_get(model_cfg, "mcm_expand", 2)),
+                use_eca=bool(_cfg_get(model_cfg, "use_eca", True)),
+                eca_kernel=eca_kernel,
+                reduce_channels=reduce_channels,
+            )
+            feat_dim = encoder.feature_dim
+        elif encoder_name in ("ivf_convnext_lite", "convnext_lite", "ivf_cnn_best"):
             encoder = IVFConvNeXtLiteEncoder(
                 dims=dims,
                 depths=depths,
@@ -629,12 +688,12 @@ def build_model(cfg):
                 stem_stride=stem_stride,
             )
             feat_dim = encoder.out_dim
-        elif backbone_name in ("resnet50", "resnet50_baseline"):
+        elif encoder_name in ("resnet50", "resnet50_baseline"):
             encoder, feat_dim = build_resnet50_encoder(pretrained=pretrained)
-        elif backbone_name in ("efficientnet_b0", "efficientnet_b0_baseline"):
+        elif encoder_name in ("efficientnet_b0", "efficientnet_b0_baseline"):
             encoder, feat_dim = build_efficientnet_b0_encoder(pretrained=pretrained)
         else:
-            raise ValueError(f"Unknown morph-stage backbone: {backbone_name}")
+            raise ValueError(f"Unknown morph-stage encoder: {encoder_name}")
 
         return IVFMorphStageHead(
             encoder=encoder,
@@ -647,6 +706,8 @@ def build_model(cfg):
             num_exp_classes=num_exp_classes,
             num_icm_classes=num_icm_classes,
             num_te_classes=num_te_classes,
+            pool_quality=pool_quality,
+            pool_aux=pool_aux,
         )
 
     raise ValueError(f"Unknown model name: {name}")
