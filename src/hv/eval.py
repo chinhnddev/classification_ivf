@@ -2,6 +2,7 @@ import argparse
 import json
 from pathlib import Path
 import torch
+import torch.nn.functional as F
 import pandas as pd
 from torchmetrics.functional.classification import binary_auroc, binary_average_precision
 
@@ -13,6 +14,7 @@ from hv.utils import load_config, ensure_dir, set_seed
 
 def collect_predictions(model, loader, device):
     probs_list = []
+    logits_list = []
     targets_list = []
     image_paths = []
     stage_preds = []
@@ -53,6 +55,7 @@ def collect_predictions(model, loader, device):
                 logits_te = None
             probs = torch.empty(0)
             if logits_quality is not None:
+                logits_list.append(logits_quality.cpu())
                 probs = torch.sigmoid(logits_quality)
                 probs_list.append(probs.cpu())
                 targets_list.append(batch["label"].cpu())
@@ -110,6 +113,7 @@ def collect_predictions(model, loader, device):
                     te_targets.extend(batch["te"].cpu().tolist())
 
     probs = torch.cat(probs_list) if probs_list else torch.empty(0)
+    logits = torch.cat(logits_list) if logits_list else torch.empty(0)
     targets = torch.cat(targets_list).float() if targets_list else torch.empty(0)
     stage_out = stage_preds if collect_stage else None
     morph_out = morph_preds if collect_morph else None
@@ -124,6 +128,7 @@ def collect_predictions(model, loader, device):
     return (
         probs,
         targets,
+        logits,
         image_paths,
         stage_out,
         morph_out,
@@ -152,6 +157,23 @@ def load_threshold_from_ckpt(ckpt_path):
     return ckpt.get("best_threshold")
 
 
+def find_temperature(val_logits, val_targets, max_iter=50):
+    if val_logits.numel() == 0 or val_targets.numel() == 0:
+        return 1.0
+    log_t = torch.zeros(1, requires_grad=True)
+    optimizer = torch.optim.LBFGS([log_t], lr=0.1, max_iter=max_iter)
+
+    def closure():
+        optimizer.zero_grad()
+        t = torch.exp(log_t)
+        loss = F.binary_cross_entropy_with_logits(val_logits / t, val_targets)
+        loss.backward()
+        return loss
+
+    optimizer.step(closure)
+    return float(torch.exp(log_t).item())
+
+
 def resolve_config(ckpt_path, config_path=None):
     if config_path:
         return load_config(config_path)
@@ -172,9 +194,12 @@ def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5):
     model = LitClassifier.load_from_checkpoint(ckpt_path, cfg=cfg, pos_weight=dm.pos_weight)
     model.to(device)
 
-    val_probs, val_targets, _, _, _, _, _, _, _, _, _, _, _ = collect_predictions(
+    val_probs, val_targets, val_logits, _, _, _, _, _, _, _, _, _, _ = collect_predictions(
         model, dm.val_dataloader(), device
     )
+    temperature = find_temperature(val_logits, val_targets)
+    if val_logits.numel():
+        val_probs = torch.sigmoid(val_logits / temperature)
     if val_probs.numel() == 0 or val_targets.numel() == 0:
         best_t = float(fixed_threshold)
         best_f1 = 0.0
@@ -196,6 +221,7 @@ def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5):
     (
         test_probs,
         test_targets,
+        test_logits,
         test_paths,
         stage_preds,
         morph_preds,
@@ -210,6 +236,8 @@ def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5):
     ) = collect_predictions(
         model, dm.test_dataloader(), device
     )
+    if test_logits.numel():
+        test_probs = torch.sigmoid(test_logits / temperature)
     test_metrics = {}
     if test_probs.numel() > 0 and test_targets.numel() > 0:
         test_metrics = compute_metrics_at_threshold(test_probs, test_targets, best_t)
@@ -277,12 +305,14 @@ def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5):
         "val": val_metrics,
         "test": test_metrics,
         "best_threshold": best_t,
+        "temperature": temperature,
     }
     metrics_path = output_dir / "metrics.json"
     metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
 
     print("Validation metrics:")
     print(val_metrics)
+    print(f"Temperature: {temperature}")
     print(f"Best threshold: {best_t}")
     print("Test metrics:")
     print(test_metrics)

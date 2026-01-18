@@ -22,13 +22,30 @@ def _cfg_get(cfg, key: str, default=None):
     return getattr(cfg, key, default)
 
 
+class AsymmetricFocalLoss(nn.Module):
+    def __init__(self, gamma_pos=1.5, gamma_neg=0.5, alpha=0.75, eps=1e-8):
+        super().__init__()
+        self.gamma_pos = float(gamma_pos)
+        self.gamma_neg = float(gamma_neg)
+        self.alpha = float(alpha)
+        self.eps = float(eps)
+
+    def forward(self, logits, targets):
+        targets = targets.float()
+        prob = torch.sigmoid(logits)
+        pos_loss = -self.alpha * (1.0 - prob).pow(self.gamma_pos) * F.logsigmoid(logits)
+        neg_loss = -(1.0 - self.alpha) * prob.pow(self.gamma_neg) * F.logsigmoid(-logits)
+        loss = pos_loss * targets + neg_loss * (1.0 - targets)
+        return loss.mean()
+
+
 class LitClassifier(pl.LightningModule):
     def __init__(self, cfg, pos_weight=1.0):
         super().__init__()
         self.cfg = cfg
         self.model = build_model(cfg)
         self.register_buffer("pos_weight", torch.tensor([float(pos_weight)]))
-        self.loss_fn = nn.BCEWithLogitsLoss(pos_weight=self.pos_weight)
+        self.loss_fn = AsymmetricFocalLoss(gamma_pos=1.5, gamma_neg=0.5, alpha=0.75)
 
         self.train_acc = BinaryAccuracy(threshold=0.5)
         self.val_acc = BinaryAccuracy(threshold=0.5)
