@@ -194,7 +194,7 @@ def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5):
     model = LitClassifier.load_from_checkpoint(ckpt_path, cfg=cfg, pos_weight=dm.pos_weight)
     model.to(device)
 
-    val_probs, val_targets, val_logits, _, _, _, _, _, _, _, _, _, _ = collect_predictions(
+    val_probs, val_targets, val_logits, _, _, _, _, _, _, _, _, _, _, _ = collect_predictions(
         model, dm.val_dataloader(), device
     )
     temperature = find_temperature(val_logits, val_targets)
