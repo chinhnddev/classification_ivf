@@ -31,6 +31,7 @@ model:
   use_mcm: false
   mcm_depth: 1
   mcm_expand: 2
+  reduce_channels: 640
   use_eca: false
   pooling: gem
   gem_p: 3.0

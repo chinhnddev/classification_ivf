@@ -113,6 +113,7 @@ class IVF_EffiMorphPP(nn.Module):
         dropout: float = 0.3,
         gem_p: float = 3.0,
         eca_kernel: int | None = None,
+        reduce_channels: int | None = 640,
     ):
         super().__init__()
         if EfficientNet_B0_Weights is not None:
@@ -123,6 +124,15 @@ class IVF_EffiMorphPP(nn.Module):
 
         self.trunk = backbone.features
         channels = backbone.classifier[-1].in_features
+        if reduce_channels is not None and reduce_channels > 0 and reduce_channels != channels:
+            self.bottleneck = nn.Sequential(
+                nn.Conv2d(channels, reduce_channels, kernel_size=1, bias=False),
+                nn.BatchNorm2d(reduce_channels),
+                nn.SiLU(),
+            )
+            channels = reduce_channels
+        else:
+            self.bottleneck = nn.Identity()
 
         self.simam = SimAM() if use_simam else nn.Identity()
         self.msma = MSMABlock(channels) if use_msma else nn.Identity()
@@ -146,6 +156,7 @@ class IVF_EffiMorphPP(nn.Module):
 
     def forward(self, x: torch.Tensor, return_features: bool = False):
         x = self.trunk(x)
+        x = self.bottleneck(x)
         x = self.simam(x)
         x = self.msma(x)
         x = self.mcm(x)

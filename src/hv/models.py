@@ -526,6 +526,9 @@ def build_model(cfg):
         mcm_expand = int(_cfg_get(model_cfg, "mcm_expand", 2))
         pooling = str(_cfg_get(model_cfg, "pooling", "gem"))
         gem_p = float(_cfg_get(model_cfg, "gem_p", 3.0))
+        reduce_channels = _cfg_get(model_cfg, "reduce_channels", 640)
+        if reduce_channels is not None:
+            reduce_channels = int(reduce_channels)
         eca_kernel = _cfg_get(model_cfg, "eca_kernel", None)
         if eca_kernel is not None:
             eca_kernel = int(eca_kernel)
@@ -541,6 +544,7 @@ def build_model(cfg):
             dropout=head_dropout,
             gem_p=gem_p,
             eca_kernel=eca_kernel,
+            reduce_channels=reduce_channels,
         )
     if name == "ivf_multitask_head":
         backbone_name = str(_cfg_get(model_cfg, "backbone", "ivf_convnext_lite")).lower()
