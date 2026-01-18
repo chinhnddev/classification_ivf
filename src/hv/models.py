@@ -9,6 +9,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import resnet50, efficientnet_b0
 
+from ivf.models.ivf_effimorphp import IVF_EffiMorphPP
+
 try:
     from torchvision.models import ResNet50_Weights, EfficientNet_B0_Weights
 except ImportError:  # pragma: no cover - older torchvision
@@ -465,6 +467,7 @@ def build_model(cfg):
         - "resnet50_baseline"
         - "efficientnet_b0_baseline"
         - "ivf_multitask_head"
+        - "ivf_effimorphp"
         - "ivf_morph_stage_head"
       cfg.model.dropout: head dropout
       cfg.model.pretrained: false
@@ -511,6 +514,34 @@ def build_model(cfg):
         return build_resnet50_baseline(pretrained=pretrained, dropout=head_dropout)
     if name == "efficientnet_b0_baseline":
         return build_efficientnet_b0_baseline(pretrained=pretrained, dropout=head_dropout)
+    if name == "ivf_effimorphp":
+        backbone_pretrained = bool(
+            _cfg_get(model_cfg, "backbone_pretrained", _cfg_get(model_cfg, "pretrained", True))
+        )
+        use_simam = bool(_cfg_get(model_cfg, "use_simam", True))
+        use_msma = bool(_cfg_get(model_cfg, "use_msma", True))
+        use_mcm = bool(_cfg_get(model_cfg, "use_mcm", True))
+        use_eca = bool(_cfg_get(model_cfg, "use_eca", True))
+        mcm_depth = int(_cfg_get(model_cfg, "mcm_depth", 1))
+        mcm_expand = int(_cfg_get(model_cfg, "mcm_expand", 2))
+        pooling = str(_cfg_get(model_cfg, "pooling", "gem"))
+        gem_p = float(_cfg_get(model_cfg, "gem_p", 3.0))
+        eca_kernel = _cfg_get(model_cfg, "eca_kernel", None)
+        if eca_kernel is not None:
+            eca_kernel = int(eca_kernel)
+        return IVF_EffiMorphPP(
+            pretrained=backbone_pretrained,
+            use_simam=use_simam,
+            use_msma=use_msma,
+            use_mcm=use_mcm,
+            mcm_depth=mcm_depth,
+            mcm_expand=mcm_expand,
+            use_eca=use_eca,
+            pooling=pooling,
+            dropout=head_dropout,
+            gem_p=gem_p,
+            eca_kernel=eca_kernel,
+        )
     if name == "ivf_multitask_head":
         backbone_name = str(_cfg_get(model_cfg, "backbone", "ivf_convnext_lite")).lower()
         enable_stage = bool(_cfg_get(model_cfg, "enable_stage", False))

@@ -2,6 +2,7 @@ import argparse
 from pathlib import Path
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
@@ -68,6 +69,13 @@ class LitClassifier(pl.LightningModule):
         self.te_correct = 0
         self.te_total = 0
         self._apply_freeze_policy()
+        self.distill_cfg = _cfg_get(cfg, "distill", None)
+        self.distill_enabled = bool(_cfg_get(self.distill_cfg, "enabled", False))
+        self.distill_temperature = float(_cfg_get(self.distill_cfg, "temperature", 1.0))
+        self.distill_lambda = float(_cfg_get(self.distill_cfg, "lambda_kd", 0.0))
+        self.teacher = None
+        if self.distill_enabled:
+            self.teacher = self._load_teacher(self.distill_cfg)
 
     def forward(self, x):
         return self.model(x)
@@ -116,6 +124,46 @@ class LitClassifier(pl.LightningModule):
         for idx, param in enumerate(params):
             param.requires_grad = idx >= n_freeze
 
+    def _load_teacher(self, distill_cfg):
+        teacher_name = str(_cfg_get(distill_cfg, "teacher_model", "resnet50_baseline"))
+        teacher_pretrained = bool(_cfg_get(distill_cfg, "teacher_pretrained", False))
+        teacher_cfg = {"model": {"name": teacher_name, "pretrained": teacher_pretrained, "dropout": 0.0}}
+        teacher = build_model(teacher_cfg)
+        ckpt_path = _cfg_get(distill_cfg, "teacher_ckpt", None)
+        if ckpt_path:
+            state = torch.load(ckpt_path, map_location="cpu")
+            state_dict = state.get("state_dict", state)
+            cleaned = {}
+            for key, value in state_dict.items():
+                if key.startswith("model."):
+                    key = key[len("model."):]
+                cleaned[key] = value
+            missing, unexpected = teacher.load_state_dict(cleaned, strict=False)
+            if missing:
+                print(f"[distill] teacher missing keys: {len(missing)}")
+            if unexpected:
+                print(f"[distill] teacher unexpected keys: {len(unexpected)}")
+        else:
+            print("[distill] teacher_ckpt not set; using teacher weights as initialized.")
+        teacher.eval()
+        for param in teacher.parameters():
+            param.requires_grad = False
+        return teacher
+
+    def _kd_loss(self, student_logits, teacher_logits):
+        temperature = self.distill_temperature
+        student_2 = torch.stack([torch.zeros_like(student_logits), student_logits], dim=1) / temperature
+        teacher_2 = torch.stack([torch.zeros_like(teacher_logits), teacher_logits], dim=1) / temperature
+        return F.kl_div(
+            F.log_softmax(student_2, dim=1),
+            F.softmax(teacher_2, dim=1),
+            reduction="batchmean",
+        ) * (temperature * temperature)
+
+    def on_fit_start(self):
+        if self.teacher is not None:
+            self.teacher.to(self.device)
+
     def on_train_epoch_start(self):
         if self.task != "stage":
             return
@@ -148,6 +196,7 @@ class LitClassifier(pl.LightningModule):
         outputs = self._unpack_outputs(outputs)
         logits = outputs["logits_quality"]
         loss = 0.0
+        batch_size = batch["image"].shape[0]
 
         if self.task in {"quality", "all"} and logits is not None and "label" in batch:
             targets = batch["label"].float()
@@ -155,6 +204,14 @@ class LitClassifier(pl.LightningModule):
             loss = loss + self.loss_w_quality * loss_quality
             probs = torch.sigmoid(logits)
             self.train_acc.update(probs, targets.int())
+            if self.distill_enabled and self.teacher is not None and self.distill_lambda > 0:
+                with torch.no_grad():
+                    teacher_out = self.teacher(batch["image"])
+                teacher_logits = self._unpack_outputs(teacher_out)["logits_quality"]
+                if teacher_logits is not None:
+                    kd_loss = self._kd_loss(logits, teacher_logits)
+                    loss = loss + self.distill_lambda * kd_loss
+                    self.log("train_kd_loss", kd_loss, on_step=True, on_epoch=True, batch_size=batch_size)
         if self.task in {"stage", "all"} and self.enable_stage and outputs["logits_stage"] is not None and "stage" in batch:
             stage_targets = batch["stage"].long()
             if (stage_targets != -1).any():
@@ -200,7 +257,6 @@ class LitClassifier(pl.LightningModule):
         if not isinstance(loss, torch.Tensor):
             loss = torch.tensor(float(loss), device=self.device)
 
-        batch_size = batch["image"].shape[0]
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch_size)
         if self.task in {"quality", "all"} and logits is not None and "label" in batch:
             self.log(
