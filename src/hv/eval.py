@@ -171,7 +171,8 @@ def find_temperature(val_logits, val_targets, max_iter=50):
         return loss
 
     optimizer.step(closure)
-    return float(torch.exp(log_t).item())
+    temperature = float(torch.exp(log_t).item())
+    return max(temperature, 1.0)
 
 
 def resolve_config(ckpt_path, config_path=None):
@@ -185,7 +186,7 @@ def resolve_config(ckpt_path, config_path=None):
     raise FileNotFoundError("config.yaml not found near checkpoint; pass --config explicitly.")
 
 
-def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5):
+def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5, use_temp_scaling=True):
     set_seed(cfg.seed)
     dm = HVDataModule(cfg, overfit_n=0)
     dm.setup()
@@ -197,9 +198,14 @@ def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5):
     val_probs, val_targets, val_logits, _, _, _, _, _, _, _, _, _, _, _ = collect_predictions(
         model, dm.val_dataloader(), device
     )
-    temperature = find_temperature(val_logits, val_targets)
+    temperature = 1.0
+    if use_temp_scaling:
+        temperature = find_temperature(val_logits, val_targets)
     if val_logits.numel():
-        val_probs = torch.sigmoid(val_logits / temperature)
+        if use_temp_scaling:
+            val_probs = torch.sigmoid(val_logits / temperature)
+        else:
+            val_probs = torch.sigmoid(val_logits)
     if val_probs.numel() == 0 or val_targets.numel() == 0:
         best_t = float(fixed_threshold)
         best_f1 = 0.0
@@ -237,7 +243,10 @@ def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5):
         model, dm.test_dataloader(), device
     )
     if test_logits.numel():
-        test_probs = torch.sigmoid(test_logits / temperature)
+        if use_temp_scaling:
+            test_probs = torch.sigmoid(test_logits / temperature)
+        else:
+            test_probs = torch.sigmoid(test_logits)
     test_metrics = {}
     if test_probs.numel() > 0 and test_targets.numel() > 0:
         test_metrics = compute_metrics_at_threshold(test_probs, test_targets, best_t)
@@ -312,7 +321,10 @@ def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5):
 
     print("Validation metrics:")
     print(val_metrics)
-    print(f"Temperature: {temperature}")
+    if use_temp_scaling:
+        print(f"Temperature: {temperature}")
+    else:
+        print("Temperature scaling disabled (T=1.0)")
     print(f"Best threshold: {best_t}")
     print("Test metrics:")
     print(test_metrics)
@@ -332,13 +344,20 @@ def parse_args():
         default="scan",
     )
     parser.add_argument("--fixed_threshold", type=float, default=0.5)
+    parser.add_argument("--disable_temperature_scaling", action="store_true")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     cfg = resolve_config(args.ckpt, args.config)
-    run_eval(cfg, args.ckpt, threshold_source=args.threshold_source, fixed_threshold=args.fixed_threshold)
+    run_eval(
+        cfg,
+        args.ckpt,
+        threshold_source=args.threshold_source,
+        fixed_threshold=args.fixed_threshold,
+        use_temp_scaling=not args.disable_temperature_scaling,
+    )
 
 
 if __name__ == "__main__":
