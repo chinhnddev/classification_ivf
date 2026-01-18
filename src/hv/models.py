@@ -7,15 +7,16 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import resnet50, efficientnet_b0
+from torchvision.models import resnet50, efficientnet_b0, mobilenet_v3_large
 
 from ivf.models.ivf_effimorphp import IVF_EffiMorphPP
 
 try:
-    from torchvision.models import ResNet50_Weights, EfficientNet_B0_Weights
+    from torchvision.models import ResNet50_Weights, EfficientNet_B0_Weights, MobileNet_V3_Large_Weights
 except ImportError:  # pragma: no cover - older torchvision
     ResNet50_Weights = None
     EfficientNet_B0_Weights = None
+    MobileNet_V3_Large_Weights = None
 
 
 # -------------------------
@@ -425,6 +426,17 @@ def build_efficientnet_b0_baseline(pretrained: bool, dropout: float) -> nn.Modul
     return BinaryLogitsWrapper(model)
 
 
+def build_mobilenet_v3_large_baseline(pretrained: bool, dropout: float) -> nn.Module:
+    if MobileNet_V3_Large_Weights is not None:
+        weights = MobileNet_V3_Large_Weights.DEFAULT if pretrained else None
+        model = mobilenet_v3_large(weights=weights)
+    else:
+        model = mobilenet_v3_large(pretrained=pretrained)
+    in_features = model.classifier[-1].in_features
+    model.classifier = nn.Sequential(nn.Dropout(p=dropout), nn.Linear(in_features, 1))
+    return BinaryLogitsWrapper(model)
+
+
 def build_resnet50_encoder(pretrained: bool) -> tuple[nn.Module, int]:
     if ResNet50_Weights is not None:
         weights = ResNet50_Weights.DEFAULT if pretrained else None
@@ -466,6 +478,7 @@ def build_model(cfg):
       cfg.model.name: "ivf_convnext_lite" (default)
         - "resnet50_baseline"
         - "efficientnet_b0_baseline"
+        - "mobilenet_v3_large_baseline"
         - "ivf_multitask_head"
         - "ivf_effimorphp"
         - "ivf_morph_stage_head"
@@ -484,6 +497,11 @@ def build_model(cfg):
 
       model:
         name: efficientnet_b0_baseline
+        dropout: 0.2
+        pretrained: false
+
+      model:
+        name: mobilenet_v3_large_baseline
         dropout: 0.2
         pretrained: false
     """
@@ -514,6 +532,8 @@ def build_model(cfg):
         return build_resnet50_baseline(pretrained=pretrained, dropout=head_dropout)
     if name == "efficientnet_b0_baseline":
         return build_efficientnet_b0_baseline(pretrained=pretrained, dropout=head_dropout)
+    if name == "mobilenet_v3_large_baseline":
+        return build_mobilenet_v3_large_baseline(pretrained=pretrained, dropout=head_dropout)
     if name == "ivf_effimorphp":
         backbone_pretrained = bool(
             _cfg_get(model_cfg, "backbone_pretrained", _cfg_get(model_cfg, "pretrained", True))
