@@ -432,8 +432,10 @@ def build_mobilenet_v3_large_baseline(pretrained: bool, dropout: float) -> nn.Mo
         model = mobilenet_v3_large(weights=weights)
     else:
         model = mobilenet_v3_large(pretrained=pretrained)
+    # Keep the 960->1280 expansion in the classifier; only replace final layer.
+    model.classifier[2] = nn.Dropout(p=dropout)
     in_features = model.classifier[-1].in_features
-    model.classifier = nn.Sequential(nn.Dropout(p=dropout), nn.Linear(in_features, 1))
+    model.classifier[-1] = nn.Linear(in_features, 1)
     return BinaryLogitsWrapper(model)
 
 
