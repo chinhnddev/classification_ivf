@@ -203,7 +203,12 @@ def main():
     dm.setup()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = LitClassifier.load_from_checkpoint(args.ckpt, cfg=cfg, pos_weight=dm.pos_weight)
+    model = LitClassifier.load_from_checkpoint(
+        args.ckpt,
+        cfg=cfg,
+        pos_weight=dm.pos_weight,
+        strict=False,
+    )
     model.to(device)
 
     threshold = args.fixed_threshold

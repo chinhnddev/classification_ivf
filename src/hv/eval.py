@@ -192,7 +192,12 @@ def run_eval(cfg, ckpt_path, threshold_source="scan", fixed_threshold=0.5, use_t
     dm.setup()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = LitClassifier.load_from_checkpoint(ckpt_path, cfg=cfg, pos_weight=dm.pos_weight)
+    model = LitClassifier.load_from_checkpoint(
+        ckpt_path,
+        cfg=cfg,
+        pos_weight=dm.pos_weight,
+        strict=False,
+    )
     model.to(device)
 
     val_probs, val_targets, val_logits, _, _, _, _, _, _, _, _, _, _, _ = collect_predictions(
